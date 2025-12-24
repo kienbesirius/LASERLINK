@@ -1,0 +1,73 @@
+# ======================
+# Python
+# ======================
+__pycache__/
+# *.py[cod]
+*$py.class
+
+# Virtualenv
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# ======================
+# Build / Package
+# ======================
+/build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+.wheels/
+
+# unignore pip internal build folder (đúng path trong repo của bạn)
+!win-py310/Lib/site-packages/pip/_internal/operations/build/
+!win-py310/Lib/site-packages/pip/_internal/operations/build/**
+
+# PyInstaller
+*.spec
+
+# ======================
+# Logs / Temp
+# ======================
+*.log
+*.tmp
+*.temp
+*.pid
+*.bak
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# mypy / type check
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ======================
+# IDE / Editor
+# ======================
+.vscode/
+*.code-workspace
+.idea/
+*.iml
+
+# ======================
+# OS files
+# ======================
+.DS_Store
+Thumbs.db
+desktop.ini

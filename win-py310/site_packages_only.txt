@@ -1,0 +1,22 @@
+SITE_PACKAGES= C:\Users\V1061378\Music\win-py310\lib\site-packages
+_distutils_hack
+certifi
+certifi-2025.11.12.dist-info
+charset_normalizer
+charset_normalizer-3.4.4.dist-info
+distutils-precedence.pth
+idna
+idna-3.11.dist-info
+pip
+pip-25.3.dist-info
+pkg_resources
+pyserial-3.5.dist-info
+requests
+requests-2.32.5.dist-info
+serial
+setuptools
+setuptools-80.9.0.dist-info
+urllib3
+urllib3-2.6.2.dist-info
+wheel
+wheel-0.45.1.dist-info
