@@ -1,36 +1,70 @@
-# src.gui.gui.py
 from __future__ import annotations
 
 import os
 import sys
 import time
-import random
+import logging
 import configparser
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
-src = Path(__file__).resolve()
+from typing import Optional
 
-while not src.name.endswith("src") and not src.name.startswith("src"):
-    src = src.parent
+from typer import style
 
-sys.path.insert(0, src)
+# -----------------------------------------------------------------------------
+# Path bootstrap: make sure we can import `src.*` when running this file directly.
+# This file is expected at: <project_root>/src/gui/gui.py
+# -----------------------------------------------------------------------------
+_THIS = Path(__file__).resolve()
+_src_dir = _THIS
+while _src_dir.name != "src" and _src_dir.parent != _src_dir:
+    _src_dir = _src_dir.parent
 
-# Optional dependencies (nice-to-have)
+# Insert project root (parent of `src/`) so that `import src...` works.
+_project_root = _src_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+# Import shared config/export from src to keep config definitions in sync
+# (CFG/DEFAULTS/ensure_config_file/... if your src/__init__.py exposes them)
 try:
-    from PIL import Image, ImageTk  # type: ignore
-    _HAS_PIL = True
+    from src import *  # type: ignore  # noqa: F401,F403
 except Exception:
-    _HAS_PIL = False
+    pass
 
+try:
+    from src.utils.resource_path import app_dir  # type: ignore
+except Exception:
+    # Fallback: treat current working dir as app_dir
+    def app_dir() -> Path:  # type: ignore
+        return Path.cwd()
+
+# Optional dependency
 try:
     import serial.tools.list_ports  # type: ignore
     _HAS_SERIAL = True
 except Exception:
     _HAS_SERIAL = False
 
+try:
+    from src.utils.buffer_logger import build_log_buffer
+except Exception:
+    # Fallback: dummy logger builder
+    import logging
+    from typing import List, Tuple
 
+    def build_log_buffer(
+        name: str = "LASERLINK",
+        level=logging.DEBUG,
+        *,
+        max_buffer: int = 500,
+    ) -> Tuple[logging.Logger, List[str]]:
+        logger = logging.getLogger(name=name)
+        logger.setLevel(level)
+        return logger, []
+    
 # -----------------------------
 # Theme constants (Light, "uy tín")
 # -----------------------------
@@ -40,248 +74,194 @@ BORDER = "#D6DAE3"
 TEXT = "#111827"
 MUTED = "#6B7280"
 
-OK_BG = "#E7F7EE"
 OK_FG = "#0F5132"
-
-ERR_BG = "#FCE8E8"
 ERR_FG = "#842029"
-
-WARN_BG = "#FFF4E5"
 WARN_FG = "#7A4B00"
 
 
 # -----------------------------
-# Config schema (validate keys/sections)
-# (đúng hướng bạn nói: section chỉ được chứa param hợp lệ)
+# Config (source of truth = src.core.CFG)
 # -----------------------------
-SCHEMA = {
-    "COM": {"COM_LASER", "COM_SFC", "COM_SCAN"},
-    "BAUDRATE": {"BAUDRATE_LASER", "BAUDRATE_SFC", "BAUDRATE_SCAN"},
-    "SERIAL_READLINE_BREAK": {"TOKENS", "ALWAYS_LAST"},
-}
-
-
-def sanitize_and_validate_ini(text: str) -> tuple[configparser.ConfigParser | None, list[str]]:
-    """
-    Parse INI text, validate:
-    - Only allow known sections in SCHEMA
-    - Each section only allows known keys
-    Return (config, errors).
-    """
-    errors: list[str] = []
-    cp = configparser.ConfigParser()
-    try:
-        cp.read_string(text)
-    except Exception as e:
-        return None, [f"INI parse error: {e}"]
-
-    for sec in cp.sections():
-        if sec not in SCHEMA:
-            errors.append(f"Section không hợp lệ: [{sec}] (allowed: {', '.join(SCHEMA.keys())})")
-            continue
-        allowed = SCHEMA[sec]
-        for k in cp[sec].keys():
-            # configparser lowercases keys by default when iterating; use original via cp[sec]._options? không ổn.
-            # Nên check theo upper.
-            if k.upper() not in allowed:
-                errors.append(f"Key không hợp lệ trong [{sec}]: {k} (allowed: {', '.join(sorted(allowed))})")
-
-    return cp, errors
-
-
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def write_text_file_atomic(path: str, content: str) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    # backup
-    if os.path.exists(path):
-        bk = path + f".bak_{time.strftime('%Y%m%d_%H%M%S')}"
-        try:
-            os.replace(path, bk)
-        except Exception:
-            pass
-    os.replace(tmp, path)
+# We intentionally DO NOT maintain a duplicate schema/defaults in GUI.
+# All COM/BAUDRATE/RULES should be read & written via the singleton CFG in src.core.
+try:
+    from src.core import CFG  # type: ignore
+except Exception:
+    CFG = None  # type: ignore
 
 
 def list_ports() -> list[str]:
     if not _HAS_SERIAL:
         return []
-    out = []
-    for p in serial.tools.list_ports.comports():
-        out.append(p.device)
-    return out
+    return [p.device for p in serial.tools.list_ports.comports()]
 
 
-# -----------------------------
-# Background grain (moving) on Canvas behind cards
-# -----------------------------
-class GrainBackground:
-    def __init__(self, parent: tk.Widget):
-        self.canvas = tk.Canvas(parent, highlightthickness=0, bd=0, bg=BG)
-        self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
-
-        self._enabled = True
-        self._last_w = 0
-        self._last_h = 0
-        self._img_id = None
-        self._tkimg = None  # keep ref
-        self._tick_ms = 140  # nhẹ, không mỏi mắt
-
-        parent.bind("<Configure>", self._on_resize)
-
-    def set_enabled(self, enabled: bool) -> None:
-        self._enabled = enabled
-        if not enabled:
-            self.canvas.delete("grain")
-            self._tkimg = None
-
-    def _on_resize(self, _e=None):
-        w = self.canvas.winfo_width()
-        h = self.canvas.winfo_height()
-        if w <= 2 or h <= 2:
-            return
-        if (w, h) != (self._last_w, self._last_h):
-            self._last_w, self._last_h = w, h
-            self._render_once()
-        self._schedule()
-
-    def _schedule(self):
-        self.canvas.after_cancel(getattr(self, "_after_id", ""))
-        self._after_id = self.canvas.after(self._tick_ms, self._render_once)
-
-    def _render_once(self):
-        if not self._enabled:
-            return
-        w, h = self._last_w, self._last_h
-        if w <= 2 or h <= 2:
-            return
-
-        # Best: PIL noise with alpha (mờ)
-        if _HAS_PIL:
-            # generate small tile then upscale slightly to reduce cost
-            tile = 160
-            img = Image.new("RGBA", (tile, tile), (0, 0, 0, 0))
-            px = img.load()
-            for y in range(tile):
-                for x in range(tile):
-                    # grain density low
-                    if random.random() < 0.12:
-                        a = random.randint(10, 22)  # low alpha
-                        v = random.randint(60, 140)
-                        px[x, y] = (v, v, v, a)
-
-            # tile fill
-            full = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            for yy in range(0, h, tile):
-                for xx in range(0, w, tile):
-                    full.alpha_composite(img, (xx, yy))
-
-            self._tkimg = ImageTk.PhotoImage(full)
-            self.canvas.delete("grain")
-            self._img_id = self.canvas.create_image(0, 0, anchor="nw", image=self._tkimg, tags=("grain",))
-        else:
-            # Fallback: draw some stipple rectangles
-            self.canvas.delete("grain")
-            for _ in range(140):
-                x = random.randint(0, max(1, w - 1))
-                y = random.randint(0, max(1, h - 1))
-                s = random.randint(1, 2)
-                self.canvas.create_rectangle(x, y, x + s, y + s, outline="", fill="#BFC6D4", tags=("grain",))
 
 
-# -----------------------------
-# In-app DialogHost (nested overlay)
-# -----------------------------
 class DialogHost(ttk.Frame):
+    """
+    Nested modal overlay (inside the main window; no Toplevel).
+    - Supports stacking dialogs.
+    - Uses grab_set to make it truly modal.
+    - Backdrop click can be enabled per-dialog (dismiss_on_backdrop).
+    """
+
     def __init__(self, parent: tk.Widget):
         super().__init__(parent)
-        self.place(x=0, y=0, relwidth=1, relheight=1)
-        self.lower()  # keep behind by default? we'll lift on show
         self.place_forget()
 
         self.stack: list[ttk.Frame] = []
+        self._focus_stack: list[Optional[tk.Widget]] = []
 
-        # dim background (still inside same window)
-        self.dim = tk.Canvas(self, highlightthickness=0, bd=0, bg="#000000")
+        # Dim background (inside same window)
+        self.dim = tk.Canvas(self, highlightthickness=0, bd=0, bg=BG)
         self.dim.place(x=0, y=0, relwidth=1, relheight=1)
-        # Tk can't do alpha on frame reliably; fake dim by drawing a rectangle w/ stipple
-        self.dim.create_rectangle(0, 0, 9999, 9999, fill="#000000", stipple="gray50", outline="")
+        self._dim_rect = self.dim.create_rectangle(0, 0, 1, 1, fill=BG, outline="")
 
+        self.bind("<Configure>", self._on_resize)
         self.bind_all("<Escape>", self._on_escape, add=True)
 
+        # Eat clicks by default; optional close handled in _on_backdrop_click
+        self.dim.bind("<Button-1>", self._on_backdrop_click)
+        self.dim.bind("<ButtonRelease-1>", lambda e: "break")
+
+    def _on_resize(self, _e=None):
+        # Keep dim rectangle sized to the overlay size
+        w = self.winfo_width()
+        h = self.winfo_height()
+        try:
+            self.dim.coords(self._dim_rect, 0, 0, w, h)
+        except tk.TclError:
+            pass
+
     def show(self, dialog: ttk.Frame) -> None:
+        # Make overlay visible and modal
         if not self.winfo_ismapped():
             self.place(x=0, y=0, relwidth=1, relheight=1)
             self.lift()
+            try:
+                self.grab_set()  # modal
+            except tk.TclError:
+                pass
 
-        # hide previous top (but keep in stack)
+        # Save focus to restore later
+        try:
+            self._focus_stack.append(self.winfo_toplevel().focus_get())
+        except Exception:
+            self._focus_stack.append(None)
+
+        # Hide previous top (keep in stack)
         if self.stack:
             self.stack[-1].place_forget()
 
         self.stack.append(dialog)
-        dialog.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Keep dim behind dialogs (but above the main UI because host is lifted)
+        # Use tk-level 'lower' so we lower the canvas widget itself (Canvas.lower is for canvas items)
+        try:
+            self.tk.call("lower", self.dim._w)
+        except tk.TclError:
+            pass
+        dialog.place(x=0, y=0, relwidth=1, relheight=1)
         dialog.lift()
 
-        # trap clicks: overlay eats events
-        self.dim.lift()
-
-        # ensure dialog on top of dim
-        dialog.lift()
+        # Give focus to dialog (if possible)
+        try:
+            dialog.focus_set()
+        except Exception:
+            pass
 
     def close_top(self) -> None:
         if not self.stack:
             return
-        top = self.stack.pop()
-        top.destroy()
 
+        top = self.stack.pop()
+        try:
+            top.destroy()
+        except Exception:
+            pass
+
+        # Restore previous or hide overlay
         if self.stack:
-            self.stack[-1].place(relx=0.5, rely=0.5, anchor="center")
-            self.stack[-1].lift()
+            dlg = self.stack[-1]
+            # restore as expanded centered dialog
+            dlg.place(x=0, y=0, relwidth=1, relheight=1)
+            dlg.lift()
+            try:
+                dlg.focus_set()
+            except Exception:
+                pass
         else:
             self.place_forget()
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
+
+        # Restore previous focus if available
+        prev = self._focus_stack.pop() if self._focus_stack else None
+        if prev and prev.winfo_exists():
+            try:
+                prev.focus_set()
+            except Exception:
+                pass
+
+    def close_all(self) -> None:
+        while self.stack:
+            self.close_top()
 
     def _on_escape(self, _e=None):
         if self.stack:
             self.close_top()
 
+    def _on_backdrop_click(self, _e=None):
+        """
+        Close only if the top dialog allows backdrop dismiss.
+        Always break to stop click-through.
+        """
+        if not self.stack:
+            return "break"
+
+        top = self.stack[-1]
+        dismiss = bool(getattr(top, "dismiss_on_backdrop", False))
+        if dismiss:
+            self.close_top()
+        return "break"
+
 
 class BaseDialog(ttk.Frame):
+    dismiss_on_backdrop: bool = True  # default; can be overridden
+
     def __init__(self, host: DialogHost, title: str, width: int = 560):
         super().__init__(host)
         self.host = host
         self["padding"] = 16
-
         self.configure(style="Card.TFrame")
-        self._w = width
 
-        # fixed size dialog feel
-        self.update_idletasks()
-        self.place_configure(width=self._w)
-
-        header = ttk.Frame(self, style="Card.TFrame")
+        # fixed width dialog feel
+        header = ttk.Frame(self, style="InCard.TFrame")
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
 
         ttk.Label(header, text=title, style="DialogTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(header, text="✕", command=self.host.close_top, width=3).grid(row=0, column=1, sticky="e")
+        ttk.Separator(header, style="Thin.TSeparator").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
-        self.body = ttk.Frame(self, style="Card.TFrame")
+        self.body = ttk.Frame(self, style="InCard.TFrame")
         self.body.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        self.footer = ttk.Frame(self, style="Card.TFrame")
+        self.footer = ttk.Frame(self, style="InCard.TFrame")
         self.footer.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         self.footer.columnconfigure(0, weight=1)
 
 
 class InfoDialog(BaseDialog):
+    dismiss_on_backdrop = True
+
     def __init__(self, host: DialogHost, info_text: str):
-        super().__init__(host, "INFO", width=620)
+        super().__init__(host, "INFO", width=640)
         txt = ScrolledText(self.body, height=14, wrap="word")
         txt.insert("1.0", info_text)
         txt.configure(state="disabled")
@@ -291,48 +271,58 @@ class InfoDialog(BaseDialog):
 
 
 class ErrorDialog(BaseDialog):
+    dismiss_on_backdrop = True
+
     def __init__(self, host: DialogHost, title: str, message: str):
-        super().__init__(host, title, width=620)
-        lbl = ttk.Label(self.body, text=message, style="Error.TLabel", wraplength=580, justify="left")
+        super().__init__(host, title, width=640)
+        lbl = ttk.Label(self.body, text=message, style="Error.TLabel", wraplength=600, justify="left")
         lbl.pack(fill="x", expand=False)
 
         ttk.Button(self.footer, text="Đóng", command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
 
 
 class EditConfigDialog(BaseDialog):
-    def __init__(self, host: DialogHost, app: "ComConfigApp"):
-        super().__init__(host, "EDIT CONFIG.INI", width=720)
+    # Avoid accidental close while editing; use explicit Cancel/Save.
+    dismiss_on_backdrop = False
+
+    def __init__(self, host: DialogHost, app: "LASERLINKAPP"):
+        super().__init__(host, "EDIT CONFIG.INI", width=740)
         self.app = app
 
         ports = [""] + list_ports()
+
         # Vars
-        self.v_com_laser = tk.StringVar(value=app.cfg_values.get("COM_LASER", ""))
-        self.v_com_sfc = tk.StringVar(value=app.cfg_values.get("COM_SFC", ""))
-        self.v_com_scan = tk.StringVar(value=app.cfg_values.get("COM_SCAN", ""))
+        snap = app.get_config_snapshot()
+        self.v_com_laser = tk.StringVar(value=snap.get("COM_LASER", ""))
+        self.v_com_sfc   = tk.StringVar(value=snap.get("COM_SFC", ""))
+        self.v_com_scan  = tk.StringVar(value=snap.get("COM_SCAN", ""))
 
-        self.v_baud_laser = tk.StringVar(value=app.cfg_values.get("BAUDRATE_LASER", "9600"))
-        self.v_baud_sfc = tk.StringVar(value=app.cfg_values.get("BAUDRATE_SFC", "9600"))
-        self.v_baud_scan = tk.StringVar(value=app.cfg_values.get("BAUDRATE_SCAN", "9600"))
+        self.v_baud_laser = tk.StringVar(value=str(snap.get("BAUDRATE_LASER", "9600")))
+        self.v_baud_sfc   = tk.StringVar(value=str(snap.get("BAUDRATE_SFC", "9600")))
+        self.v_baud_scan  = tk.StringVar(value=str(snap.get("BAUDRATE_SCAN", "9600")))
 
-        grid = ttk.Frame(self.body, style="Card.TFrame")
+
+        grid = ttk.Frame(self.body, style="InCard.TFrame")
         grid.pack(fill="both", expand=True)
         for c in range(2):
             grid.columnconfigure(c, weight=1)
 
-        def row(r: int, label: str, var: tk.StringVar, choices: list[str] | None = None):
+        def row(r: int, label: str, var: tk.StringVar, choices: Optional[list[str]] = None):
             ttk.Label(grid, text=label, style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=6, padx=(0, 10))
-            if choices is not None:
+            if choices:
                 cb = ttk.Combobox(grid, textvariable=var, values=choices, state="readonly")
                 cb.grid(row=r, column=1, sticky="ew", pady=6)
             else:
                 ent = ttk.Entry(grid, textvariable=var)
                 ent.grid(row=r, column=1, sticky="ew", pady=6)
 
-        row(0, "COM_LASER", self.v_com_laser, ports if ports else None)
-        row(1, "COM_SFC", self.v_com_sfc, ports if ports else None)
-        row(2, "COM_SCAN", self.v_com_scan, ports if ports else None)
+        # If no pyserial, show Entry widgets.
+        port_choices = ports if ports and _HAS_SERIAL else None
+        row(0, "COM_LASER", self.v_com_laser, port_choices)
+        row(1, "COM_SFC", self.v_com_sfc, port_choices)
+        row(2, "COM_SCAN", self.v_com_scan, port_choices)
 
-        ttk.Separator(grid).grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(grid, style="Thin.TSeparator").grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
 
         row(4, "BAUDRATE_LASER", self.v_baud_laser, None)
         row(5, "BAUDRATE_SFC", self.v_baud_sfc, None)
@@ -346,11 +336,11 @@ class EditConfigDialog(BaseDialog):
         hint.pack(anchor="w", pady=(10, 0))
 
         # Footer buttons
-        left = ttk.Frame(self.footer, style="Card.TFrame")
+        left = ttk.Frame(self.footer, style="InCard.TFrame")
         left.grid(row=0, column=0, sticky="w")
         ttk.Button(left, text="Scan Ports", command=self._scan_ports).pack(side="left")
 
-        right = ttk.Frame(self.footer, style="Card.TFrame")
+        right = ttk.Frame(self.footer, style="InCard.TFrame")
         right.grid(row=0, column=0, sticky="e")
         ttk.Button(right, text="Cancel", command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
         ttk.Button(right, text="Save", command=self._save, width=10).pack(side="right")
@@ -377,17 +367,21 @@ class EditConfigDialog(BaseDialog):
             return
 
         # Apply
-        self.app.cfg_values["COM_LASER"] = self.v_com_laser.get().strip()
-        self.app.cfg_values["COM_SFC"] = self.v_com_sfc.get().strip()
-        self.app.cfg_values["COM_SCAN"] = self.v_com_scan.get().strip()
-        self.app.cfg_values["BAUDRATE_LASER"] = self.v_baud_laser.get().strip()
-        self.app.cfg_values["BAUDRATE_SFC"] = self.v_baud_sfc.get().strip()
-        self.app.cfg_values["BAUDRATE_SCAN"] = self.v_baud_scan.get().strip()
+        com_updates = {
+            "COM_LASER": self.v_com_laser.get().strip(),
+            "COM_SFC":   self.v_com_sfc.get().strip(),
+            "COM_SCAN":  self.v_com_scan.get().strip(),
+        }
+        baud_updates = {
+            "BAUDRATE_LASER": int(self.v_baud_laser.get().strip()),
+            "BAUDRATE_SFC":   int(self.v_baud_sfc.get().strip()),
+            "BAUDRATE_SCAN":  int(self.v_baud_scan.get().strip()),
+        }
 
-        ok, msg = self.app.save_config_values()
+        ok, msg = self.app.save_config_values(com_updates, baud_updates)
         if ok:
             self.host.close_top()
-            self.app.set_status("OK", f"Saved: {os.path.basename(self.app.config_path)}")
+            self.app.set_status("OK", f"Saved: {self.app.config_path.name}")
         else:
             self.host.show(ErrorDialog(self.host, "SAVE FAILED", msg))
 
@@ -395,13 +389,13 @@ class EditConfigDialog(BaseDialog):
 # -----------------------------
 # Main App
 # -----------------------------
-class ComConfigApp(tk.Tk):
-    def __init__(self, config_path: str = "config.ini"):
+class LASERLINKAPP(tk.Tk):
+    def __init__(self):
         super().__init__()
-        self.title("COM Config Utility")
+        self.title("LASERLINK")
         self.configure(bg=BG)
 
-        # BookyApp-ish min/max sizing (bạn chỉnh số này theo gui.py gốc)
+        # BookyApp-ish min/max sizing
         self.minsize(980, 640)
         self.maxsize(1280, 820)
 
@@ -414,15 +408,47 @@ class ComConfigApp(tk.Tk):
 
         style.configure("TFrame", background=BG)
         style.configure("Card.TFrame", background=CARD_BG, borderwidth=1, relief="solid")
+        style.configure("InCard.TFrame", background=CARD_BG, borderwidth=0, relief="flat")
+        style.configure("Thin.TSeparator", background=BORDER)
         style.configure("TLabel", background=CARD_BG, foreground=TEXT)
         style.configure("Muted.TLabel", background=CARD_BG, foreground=MUTED)
         style.configure("DialogTitle.TLabel", background=CARD_BG, foreground=TEXT, font=("TkDefaultFont", 12, "bold"))
         style.configure("Error.TLabel", background=CARD_BG, foreground=ERR_FG)
 
-        # Background grain behind everything
-        self.grain = GrainBackground(self)
+        # ---- Status styles (for background coloring) ----
+        style.configure("StatusCard.TFrame", background=CARD_BG, borderwidth=1, relief="solid")
+        style.configure("StatusTitle.TLabel", background=CARD_BG, foreground=MUTED)
+        style.configure("StatusBig.TLabel",   background=CARD_BG, foreground=TEXT)
+        style.configure("StatusDesc.TLabel",  background=CARD_BG, foreground=MUTED)
 
-        # Main content container (cards sit above grain)
+        self._style = style  # giữ lại để update runtime
+
+        # Xanh / Đỏ / Lục / Vàng / Trắng (high-contrast cho công nhân)
+        self.STATUS_THEMES = {
+            # trắng
+            "IDLE":       ("#FFFFFF", TEXT, MUTED),
+            "READY":      ("#FFFFFF", TEXT, MUTED),
+            "STOPPED":    ("#FFFFFF", TEXT, MUTED),
+
+            # xanh (blue) cho “đang chạy/đang test”
+            "LISTENING":  ("#0EA5E9", "#FFFFFF", "#E5E7EB"),
+            "TESTING":    ("#2563EB", "#FFFFFF", "#E5E7EB"),
+            "STANDBY":    ("#0EA5E9", "#FFFFFF", "#E5E7EB"),
+
+            # lục (green) cho OK/PASS
+            "OK":         ("#22C55E", "#FFFFFF", "#ECFDF5"),
+            "PASS":       ("#22C55E", "#FFFFFF", "#ECFDF5"),
+
+            # vàng (yellow) cho WARN
+            "WARN":       ("#F59E0B", "#111827", "#111827"),
+            "WARNING":    ("#F59E0B", "#111827", "#111827"),
+
+            # đỏ (red) cho FAIL/ERROR
+            "FAIL":       ("#EF4444", "#FFFFFF", "#FEE2E2"),
+            "ERROR":      ("#DC2626", "#FFFFFF", "#FEE2E2"),
+        }
+
+        # Main content container
         self.container = ttk.Frame(self, padding=18, style="TFrame")
         self.container.place(x=0, y=0, relwidth=1, relheight=1)
 
@@ -430,17 +456,17 @@ class ComConfigApp(tk.Tk):
         self.container.rowconfigure(1, weight=1)
 
         # Header: Status card
-        self.status_card = ttk.Frame(self.container, style="Card.TFrame", padding=16)
+        self.status_card = ttk.Frame(self.container, style="StatusCard.TFrame", padding=16)
         self.status_card.grid(row=0, column=0, sticky="ew")
         self.status_card.columnconfigure(0, weight=1)
 
-        self.status_title = ttk.Label(self.status_card, text="STATUS", style="Muted.TLabel")
+        self.status_title = ttk.Label(self.status_card, text="STATUS", style="StatusTitle.TLabel")
         self.status_title.grid(row=0, column=0, sticky="w")
 
-        self.status_big = ttk.Label(self.status_card, text="IDLE", font=("TkDefaultFont", 26, "bold"))
+        self.status_big = ttk.Label(self.status_card, text="IDLE", style="StatusBig.TLabel", font=("TkDefaultFont", 26, "bold"))
         self.status_big.grid(row=1, column=0, sticky="w", pady=(6, 0))
 
-        self.status_desc = ttk.Label(self.status_card, text="Ready.", style="Muted.TLabel")
+        self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         # Content row: left config + right log
@@ -470,24 +496,56 @@ class ComConfigApp(tk.Tk):
         # Dialog host (overlay in parent)
         self.dialog_host = DialogHost(self)
 
-        # Config state
-        self.config_path = config_path
-        self.cfg_values: dict[str, str] = {}
+        # 1) init logger hub
+        self.logger, self.log_buff = build_log_buffer("LASERLINK", max_buffer=5000)
+        # track last log object rendered (IMPORTANT for trimmed ring-buffer)
+        self._last_log_obj = None
+
+        # 2) attach CFG logging -> goes into logger -> into log_buff
+        self.cfg = CFG
+        self.config_path = Path(getattr(self.cfg, "config_path", app_dir() / "config.ini"))
+        if self.cfg is not None and hasattr(self.cfg, "set_logger"):
+            self.cfg.set_logger(self.append_log)
+        # if self.cfg is not None and hasattr(self.cfg, "set_logger"):
+        #     self.cfg.set_logger(self.logger.debug)  # or .debug if you want more verbose
+
+        # 3) start UI pump to display logs from log_buff (main thread safe)
+        self.after(100, self._pump_log_buffer)
+        
+        # Log state
+        self._log_lines: int = 0
+        self._log_max_lines: int = 120
+
+        # Mock UI state
+        self._mock_running: bool = False
+        self._mock_after_id: Optional[str] = None
+        self._mock_i: int = 0
+        self._mock_seq: list[tuple[str, str]] = [
+            ("IDLE", "Ready."),
+            ("LISTENING", "Waiting for LASER trigger..."),
+            ("TESTING", "Sending to SFC..."),
+            ("PASS", "SFC: PASSED=1"),
+            ("TESTING", "Next cycle..."),
+            ("FAIL", "SFC: FAIL"),
+            ("WARN", "Retrying / Port unstable..."),
+            ("ERROR", "Timeout / No response..."),
+        ]
 
         # Build left panel widgets
         ttk.Label(self.left, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(self.left, text=os.path.abspath(self.config_path), style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
+        ttk.Label(self.left, text=str(self.config_path), style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
 
-        btns = ttk.Frame(self.left, style="Card.TFrame")
+        btns = ttk.Frame(self.left, style="InCard.TFrame")
         btns.pack(fill="x")
+
         ttk.Button(btns, text="Reload", command=self.reload_config).pack(fill="x")
-        ttk.Button(btns, text="Edit COM/BAUDRATE", command=self.open_edit_config).pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="Edit comfig", command=self.open_edit_config).pack(fill="x", pady=(8, 0))
         ttk.Button(btns, text="Info", command=self.open_info).pack(fill="x", pady=(8, 0))
 
-        ttk.Separator(self.left).pack(fill="x", pady=14)
+        ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
-        self.chk_grain = tk.BooleanVar(value=True)
-        ttk.Checkbutton(self.left, text="Enable moving grain", variable=self.chk_grain, command=self._toggle_grain).pack(anchor="w")
+        self.btn_mock = ttk.Button(self.left, text="Start Mock UX", command=self._toggle_mock)
+        self.btn_mock.pack(fill="x")
 
         # Right panel: log
         ttk.Label(self.right, text="LOG", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
@@ -496,140 +554,273 @@ class ComConfigApp(tk.Tk):
         self.log.configure(state="disabled")
 
         # Footer content
-        ttk.Label(self.footer, text="Tip: dùng Edit để sửa config.ini cho đúng COM/BAUDRATE trên máy.", foreground=MUTED, background=BG)\
-            .grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            self.footer,
+            text="Tip: dùng Edit để sửa config.ini cho đúng COM/BAUDRATE trên máy.",
+            foreground=MUTED,
+            background=BG,
+        ).grid(row=0, column=0, sticky="w")
 
         self.reload_config()
         self.set_status("IDLE", "Ready.")
 
-    def _toggle_grain(self):
-        self.grain.set_enabled(self.chk_grain.get())
+    def _resolve_config_path(self, config_path: str | os.PathLike[str]) -> Path:
+        p = Path(config_path)
+        if p.is_absolute():
+            return p
+        # Prefer app_dir() to keep config next to exe/entry
+        return app_dir() / p
 
-    def append_log(self, s: str):
+    # -----------------------------
+    # Mock UX / Status testing
+    # -----------------------------
+    def init_mock_ui(self, enabled: bool = True, *, interval_ms: int = 900) -> None:
+        """
+        Start/stop a status "demo" loop so you can evaluate the STATUS card UX
+        without connecting any COM / running any backend.
+        """
+        if not enabled:
+            self._stop_mock_ui()
+            return
+
+        self._mock_running = True
+        self.btn_mock.configure(text="Stop Mock UX")
+
+        def tick():
+            if not self._mock_running:
+                return
+            code, desc = self._mock_seq[self._mock_i % len(self._mock_seq)]
+            self._mock_i += 1
+            self.set_status(code, desc)
+            self.logger.info(f"[MOCK] {code}: {desc}")
+            self._mock_after_id = self.after(interval_ms, tick)
+
+        # Kick immediately
+        tick()
+
+    def _stop_mock_ui(self) -> None:
+        self._mock_running = False
+        self.btn_mock.configure(text="Start Mock UX")
+        if self._mock_after_id:
+            try:
+                self.after_cancel(self._mock_after_id)
+            except Exception:
+                pass
+            self._mock_after_id = None
+
+    def _toggle_mock(self) -> None:
+        if self._mock_running:
+            self._stop_mock_ui()
+            self.set_status("IDLE", "Mock stopped.")
+            self.logger.info("[MOCK] stopped")
+        else:
+            self.init_mock_ui(True)
+
+    # -----------------------------
+    # UI helpers
+    # -----------------------------
+
+    def _pump_log_buffer(self):
+        try:
+            buf = getattr(self, "log_buff", None)
+            if not buf:
+                return
+
+            MAX_PUSH_PER_TICK = 250  # tránh UI freeze nếu log dồn quá nhiều
+
+            last_obj = getattr(self, "_last_log_obj", None)
+
+            # First render: show a small tail
+            if last_obj is None:
+                new_lines = buf[-MAX_PUSH_PER_TICK:]
+            else:
+                # Find last_obj by identity from the end (fast + avoids duplicate text issues)
+                idx = -1
+                for i in range(len(buf) - 1, -1, -1):
+                    if buf[i] is last_obj:
+                        idx = i
+                        break
+
+                if idx >= 0:
+                    new_lines = buf[idx + 1:]
+                else:
+                    # last_obj was trimmed out -> catch up with tail
+                    new_lines = buf[-MAX_PUSH_PER_TICK:]
+
+            if new_lines:
+                # Nếu dồn quá nhiều log trong 1 tick -> chỉ lấy tail để UI mượt
+                if len(new_lines) > MAX_PUSH_PER_TICK:
+                    new_lines = new_lines[-MAX_PUSH_PER_TICK:]
+
+                for line in new_lines:
+                    self._append_log_view(line)
+                    # self.logger.info(line)
+
+                # update last rendered pointer
+                if buf:
+                    self._last_log_obj = buf[-1]
+
+        finally:
+            self.after(100, self._pump_log_buffer)
+
+
+    def append_log(self, s: str, level: int = logging.INFO) -> None:
+        """
+        Public API: safe to call from any thread.
+        Unified flow: append_log -> logger -> log_buff -> _pump_log_buffer -> UI.
+        """
+        msg = (s or "").rstrip("\r\n")
+        try:
+            self.logger.log(level, msg)
+        except Exception:
+            pass
+
+
+    def _append_log_view(self, s: str) -> None:
+        """
+        UI-only: must be called in Tk main thread.
+        """
+        line = (s or "").rstrip() + "\n"
         self.log.configure(state="normal")
-        self.log.insert("end", s.rstrip() + "\n")
+        self.log.insert("end", line)
+        self._log_lines += 1
+
+        if self._log_lines > self._log_max_lines:
+            extra = self._log_lines - self._log_max_lines
+            try:
+                self.log.delete("1.0", f"{extra + 1}.0")
+                self._log_lines = self._log_max_lines
+            except tk.TclError:
+                pass
+
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    # def set_status(self, code: str, desc: str = ""):
+    #     code_u = (code or "").upper()
+    #     self.status_big.configure(text=code_u)
+    #     self.status_desc.configure(text=desc or "")
+
+    #     # Simple status styling (foreground only to avoid ttk theme fights)
+    #     if code_u in ("OK", "PASS", "READY"):
+    #         self._set_status_colors(OK_FG)
+    #     elif code_u in ("ERROR", "FAIL"):
+    #         self._set_status_colors(ERR_FG)
+    #     elif code_u in ("WARN", "WARNING"):
+    #         self._set_status_colors(WARN_FG)
+    #     else:
+    #         self._set_status_colors(TEXT)
+
+    def _set_status_colors(self, fg: str):
+        self.status_big.configure(foreground=fg)
+    
+    def _apply_status_theme(self, bg: str, big_fg: str, sub_fg: str) -> None:
+        # Update styles so whole status card changes background
+        self._style.configure("StatusCard.TFrame", background=bg)
+        self._style.configure("StatusTitle.TLabel", background=bg, foreground=sub_fg)
+        self._style.configure("StatusBig.TLabel", background=bg, foreground=big_fg)
+        self._style.configure("StatusDesc.TLabel", background=bg, foreground=sub_fg)
+
     def set_status(self, code: str, desc: str = ""):
-        # simple status styling
         code_u = (code or "").upper()
         self.status_big.configure(text=code_u)
         self.status_desc.configure(text=desc or "")
 
-        # Change card background subtly (optional)
-        if code_u in ("OK", "PASS", "READY"):
-            self._set_status_card_colors(OK_BG, OK_FG)
-        elif code_u in ("ERROR", "FAIL"):
-            self._set_status_card_colors(ERR_BG, ERR_FG)
-        elif code_u in ("WARN", "WARNING"):
-            self._set_status_card_colors(WARN_BG, WARN_FG)
-        else:
-            self._set_status_card_colors(CARD_BG, TEXT)
+        bg, big_fg, sub_fg = self.STATUS_THEMES.get(code_u, self.STATUS_THEMES["IDLE"])
+        self._apply_status_theme(bg, big_fg, sub_fg)
 
-    def _set_status_card_colors(self, bg: str, fg: str):
-        # For ttk, easiest: set direct bg on tk widgets; keep ttk frames white normally.
-        # Here we only tint big label background via tk.Label? But we use ttk.Label.
-        # So: keep it simple—just change big label fg.
-        self.status_big.configure(foreground=fg)
-
+    # -----------------------------
+    # Actions
+    # -----------------------------
     def open_info(self):
-        info = []
+        info: list[str] = []
         info.append("COM Config Utility (Tkinter)")
-        info.append(f"Config path: {os.path.abspath(self.config_path)}")
+        info.append(f"Config path: {self.config_path}")
         info.append("")
         info.append("Detected ports:")
         ports = list_ports()
         info.extend(ports if ports else ["(pyserial missing or no ports found)"])
         info.append("")
         info.append("Current loaded values:")
-        for k in sorted(self.cfg_values.keys()):
-            info.append(f"  {k} = {self.cfg_values[k]}")
+        snap = self.get_config_snapshot()
+        for k in sorted(snap.keys()):
+            info.append(f"  {k} = {snap[k]}")
         self.dialog_host.show(InfoDialog(self.dialog_host, "\n".join(info)))
 
     def open_edit_config(self):
         self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
 
-    def reload_config(self):
-        if not os.path.exists(self.config_path):
-            self.cfg_values = {
-                "COM_LASER": "",
-                "COM_SFC": "",
-                "COM_SCAN": "",
+    def get_config_snapshot(self) -> dict[str, str]:
+        """
+        Snapshot current config for UI (strings), sourced from src.core.CFG.
+        """
+        if self.cfg is None:
+            return {
+                "COM_LASER": "COM1",
+                "COM_SFC": "COM2",
+                "COM_SCAN": "COM3",
                 "BAUDRATE_LASER": "9600",
                 "BAUDRATE_SFC": "9600",
                 "BAUDRATE_SCAN": "9600",
             }
-            self.append_log(f"[WARN] config.ini not found, using defaults.")
-            self.set_status("WARN", "config.ini not found (defaults loaded)")
-            return
 
-        text = read_text_file(self.config_path)
-        cp, errs = sanitize_and_validate_ini(text)
-        if cp is None or errs:
-            self.append_log("[ERROR] Invalid config.ini")
-            for e in errs:
-                self.append_log("  - " + e)
-            self.set_status("ERROR", "Invalid config.ini")
-            self.dialog_host.show(ErrorDialog(self.dialog_host, "CONFIG INVALID", "\n".join(errs) if errs else "Unknown error"))
-            return
+        # Let CFG handle auto-reload based on mtime.
+        self.cfg.reload_if_changed()
+        com = self.cfg.com
+        baud = self.cfg.baudrate
 
-        # Extract only the parts UI cares about
-        self.cfg_values = {}
-        self.cfg_values["COM_LASER"] = cp.get("COM", "COM_LASER", fallback="")
-        self.cfg_values["COM_SFC"] = cp.get("COM", "COM_SFC", fallback="")
-        self.cfg_values["COM_SCAN"] = cp.get("COM", "COM_SCAN", fallback="")
-
-        self.cfg_values["BAUDRATE_LASER"] = cp.get("BAUDRATE", "BAUDRATE_LASER", fallback="9600")
-        self.cfg_values["BAUDRATE_SFC"] = cp.get("BAUDRATE", "BAUDRATE_SFC", fallback="9600")
-        self.cfg_values["BAUDRATE_SCAN"] = cp.get("BAUDRATE", "BAUDRATE_SCAN", fallback="9600")
-
-        self.append_log("[OK] Loaded config.ini")
-        self.set_status("OK", "Config loaded")
-
-    def save_config_values(self) -> tuple[bool, str]:
-        # Build a minimal INI content (you có thể merge giữ nguyên các section khác nếu muốn)
-        cp = configparser.ConfigParser()
-        cp["COM"] = {
-            "COM_LASER": self.cfg_values.get("COM_LASER", ""),
-            "COM_SFC": self.cfg_values.get("COM_SFC", ""),
-            "COM_SCAN": self.cfg_values.get("COM_SCAN", ""),
-        }
-        cp["BAUDRATE"] = {
-            "BAUDRATE_LASER": self.cfg_values.get("BAUDRATE_LASER", "9600"),
-            "BAUDRATE_SFC": self.cfg_values.get("BAUDRATE_SFC", "9600"),
-            "BAUDRATE_SCAN": self.cfg_values.get("BAUDRATE_SCAN", "9600"),
+        return {
+            "COM_LASER": str(getattr(com, "COM_LASER", "")),
+            "COM_SFC": str(getattr(com, "COM_SFC", "")),
+            "COM_SCAN": str(getattr(com, "COM_SCAN", "")),
+            "BAUDRATE_LASER": str(getattr(baud, "BAUDRATE_LASER", 9600)),
+            "BAUDRATE_SFC": str(getattr(baud, "BAUDRATE_SFC", 9600)),
+            "BAUDRATE_SCAN": str(getattr(baud, "BAUDRATE_SCAN", 9600)),
         }
 
-        # If you want preserve SERIAL_READLINE_BREAK: read old and copy over
-        if os.path.exists(self.config_path):
-            old = configparser.ConfigParser()
-            try:
-                old.read(self.config_path, encoding="utf-8")
-                if old.has_section("SERIAL_READLINE_BREAK"):
-                    cp["SERIAL_READLINE_BREAK"] = dict(old["SERIAL_READLINE_BREAK"])
-            except Exception:
-                pass
-
-        # Serialize
-        from io import StringIO
-        buf = StringIO()
-        cp.write(buf)
-        content = buf.getvalue()
-
-        # Validate before write (schema)
-        cp2, errs = sanitize_and_validate_ini(content)
-        if cp2 is None or errs:
-            return False, "Internal validation failed:\n" + "\n".join(errs)
+    def reload_config(self):
+        if self.cfg is None:
+            self.logger.info("[ERROR] CFG import failed: cannot load config via src.core.CFG")
+            self.set_status("ERROR", "CFG import failed")
+            return
 
         try:
-            write_text_file_atomic(self.config_path, content)
-            self.append_log("[OK] Saved config.ini (backup created if existed)")
-            return True, ""
+            self.cfg.reload(force=True)
+            self.logger.info("[OK] Reloaded config.ini via CFG")
+            self.set_status("OK", "Config loaded")
+        except Exception as e:
+            self.logger.info(f"[ERROR] CFG reload failed: {e}")
+            self.set_status("ERROR", "Config reload failed")
+            self.dialog_host.show(ErrorDialog(self.dialog_host, "CFG RELOAD FAILED", str(e)))
+
+    def save_config_values(self, com_updates: dict[str, str], baud_updates: dict[str, int]) -> tuple[bool, str]:
+        """
+        Save COM/BAUDRATE via CFG to keep GUI synced with src.core config pipeline.
+        Requires ConfigManager.update_sections() to be added (see patch below).
+        """
+        if self.cfg is None:
+            return False, "CFG import failed (src.core.CFG is None)"
+
+        try:
+            # If you added update_sections() in ConfigManager, use it.
+            if hasattr(self.cfg, "update_sections"):
+                ok = bool(self.cfg.update_sections({
+                    "COM": com_updates,
+                    "BAUDRATE": {k: str(v) for k, v in baud_updates.items()},
+                }, make_backup=True, reload_after=True))
+                if ok:
+                    self.logger.info("[OK] Saved config.ini via CFG.update_sections()")
+                    return True, ""
+                return False, "CFG.update_sections() returned False"
+
+            return False, "Missing CFG.update_sections(). Please apply core patch."
+
         except Exception as e:
             return False, f"Write failed: {e}"
 
 
 if __name__ == "__main__":
-    app = ComConfigApp("config.ini")
+    app = LASERLINKAPP()
+    if ("--mock" in sys.argv) or (os.environ.get("LASERLINK_MOCK_UI", "").strip() == "1"):
+        app.init_mock_ui(True)
     app.mainloop()

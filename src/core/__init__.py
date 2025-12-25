@@ -228,6 +228,130 @@ class ConfigManager:
 
         return True
 
+    def update_sections(
+        self,
+        updates: dict[str, dict[str, str]],
+        *,
+        make_backup: bool = True,
+        reload_after: bool = True,
+    ) -> bool:
+        """
+        Update INI by patching only specified sections/keys (preserve the rest),
+        then optionally reload CFG cache.
+
+        Example:
+            CFG.update_sections({
+                "COM": {"COM_LASER":"COM5", "COM_SFC":"COM8"},
+                "BAUDRATE": {"BAUDRATE_LASER":"9600"}
+            })
+        """
+        import re, os, time
+
+        # ensure config exists + has required baseline keys/sections
+        try:
+            ensure_config_ini(self.log)  # from src (public)
+        except Exception:
+            # still try to proceed if ensure isn't available
+            pass
+
+        path = self.config_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not path.exists():
+            # ensure_config_ini should have created it; if not, create minimal file
+            path.write_text("", encoding="utf-8")
+
+        text = path.read_text(encoding="utf-8", errors="replace")
+        nl = "\r\n" if "\r\n" in text else "\n"
+        lines = text.splitlines(True)  # keep line endings
+
+        def is_section_header(line: str) -> bool:
+            s = line.strip()
+            if not s or s.startswith(("#", ";")):
+                return False
+            return s.startswith("[") and s.endswith("]") and len(s) >= 3
+
+        def section_name(line: str) -> str:
+            return line.strip()[1:-1].strip()
+
+        def find_section_range(sec: str) -> tuple[int | None, int | None]:
+            start = None
+            for i, ln in enumerate(lines):
+                if is_section_header(ln) and section_name(ln).lower() == sec.lower():
+                    start = i
+                    break
+            if start is None:
+                return None, None
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if is_section_header(lines[j]):
+                    end = j
+                    break
+            return start, end
+
+        def ensure_section_exists(sec: str) -> tuple[int, int]:
+            s, e = find_section_range(sec)
+            if s is not None and e is not None:
+                return s, e
+
+            # append section
+            if lines and lines[-1].strip() != "":
+                lines.append(nl)
+            lines.append(f"[{sec}]{nl}")
+            return find_section_range(sec)  # type: ignore[return-value]
+
+        def patch_key(sec: str, key: str, value: str) -> None:
+            s, e = ensure_section_exists(sec)
+
+            key_re = re.compile(rf"^\s*{re.escape(key)}\s*[:=]", re.IGNORECASE)
+
+            # re-find each time because list length can change
+            s, e = find_section_range(sec)
+            assert s is not None and e is not None
+
+            found = False
+            for i in range(s + 1, e):
+                raw = lines[i]
+                stripped = raw.lstrip()
+                if stripped.startswith(("#", ";")):
+                    continue
+                if key_re.match(raw):
+                    indent = re.match(r"^\s*", raw).group(0)
+                    lines[i] = f"{indent}{key}={value}{nl}"
+                    found = True
+                    break
+
+            if not found:
+                insert_at = e
+                while insert_at > s + 1 and lines[insert_at - 1].strip() == "":
+                    insert_at -= 1
+                lines.insert(insert_at, f"{key}={value}{nl}")
+
+        # apply updates
+        for sec, kv in updates.items():
+            for k, v in kv.items():
+                patch_key(sec, k, str(v))
+
+        new_text = "".join(lines)
+
+        # backup + atomic-ish replace
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+
+        if make_backup and path.exists():
+            bk = path.with_suffix(path.suffix + f".bak_{time.strftime('%Y%m%d_%H%M%S')}")
+            try:
+                os.replace(path, bk)
+            except Exception:
+                pass
+
+        os.replace(tmp, path)
+
+        if reload_after:
+            self.reload(force=True)
+
+        return True
+
 
 def load_readline_break_rules(cfg_path: str, *, log=print) -> List[BreakRule]:
     import configparser
