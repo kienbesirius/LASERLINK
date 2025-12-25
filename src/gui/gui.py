@@ -4,7 +4,8 @@ import os
 import sys
 import time
 import logging
-import configparser
+import threading
+import queue
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
@@ -65,6 +66,13 @@ except Exception:
         logger.setLevel(level)
         return logger, []
     
+try:
+    from src.core.core import LaserSfcBridge  # type: ignore
+except Exception as e:
+    import traceback
+    traceback.print_exc()   # <<< in ra đúng file + dòng lỗi
+    LaserSfcBridge = None  # type: ignore
+
 # -----------------------------
 # Theme constants (Light, "uy tín")
 # -----------------------------
@@ -620,6 +628,23 @@ class LASERLINKAPP(tk.Tk):
         self.reload_config()
         self.set_status("IDLE", "Ready.")
 
+        # ---- core runtime ----
+        self._core_q = queue.SimpleQueue()
+        self._core_thread: Optional[threading.Thread] = None
+        self.bridge = None
+        self._last_result_ts = 0.0
+        self._last_result_status = ""
+
+        # đảm bảo có handler đóng app
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # start core
+        self._start_core()
+
+        # poll core state
+        self.after(100, self._poll_core_state)
+
+
     def _resolve_config_path(self, config_path: str | os.PathLike[str]) -> Path:
         p = Path(config_path)
         if p.is_absolute():
@@ -686,46 +711,44 @@ class LASERLINKAPP(tk.Tk):
     # -----------------------------
     # UI helpers
     # -----------------------------
-
     def _pump_log_buffer(self):
         try:
             buf = getattr(self, "log_buff", None)
             if not buf:
                 return
 
-            MAX_PUSH_PER_TICK = 250  # tránh UI freeze nếu log dồn quá nhiều
+            lock = getattr(self.logger, "_laserlink_lock", None)
 
-            last_obj = getattr(self, "_last_log_obj", None)
+            def compute_new_lines():
+                MAX_PUSH_PER_TICK = 250
+                last_obj = getattr(self, "_last_log_obj", None)
 
-            # First render: show a small tail
-            if last_obj is None:
-                new_lines = buf[-MAX_PUSH_PER_TICK:]
-            else:
-                # Find last_obj by identity from the end (fast + avoids duplicate text issues)
-                idx = -1
-                for i in range(len(buf) - 1, -1, -1):
-                    if buf[i] is last_obj:
-                        idx = i
-                        break
-
-                if idx >= 0:
-                    new_lines = buf[idx + 1:]
+                if last_obj is None:
+                    nl = buf[-MAX_PUSH_PER_TICK:]
                 else:
-                    # last_obj was trimmed out -> catch up with tail
-                    new_lines = buf[-MAX_PUSH_PER_TICK:]
+                    idx = -1
+                    for i in range(len(buf) - 1, -1, -1):
+                        if buf[i] is last_obj:
+                            idx = i
+                            break
+                    nl = buf[idx + 1:] if idx >= 0 else buf[-MAX_PUSH_PER_TICK:]
+
+                if len(nl) > MAX_PUSH_PER_TICK:
+                    nl = nl[-MAX_PUSH_PER_TICK:]
+
+                new_last = buf[-1] if buf else last_obj
+                return list(nl), new_last
+
+            if lock:
+                with lock:
+                    new_lines, new_last = compute_new_lines()
+            else:
+                new_lines, new_last = compute_new_lines()
 
             if new_lines:
-                # Nếu dồn quá nhiều log trong 1 tick -> chỉ lấy tail để UI mượt
-                if len(new_lines) > MAX_PUSH_PER_TICK:
-                    new_lines = new_lines[-MAX_PUSH_PER_TICK:]
-
                 for line in new_lines:
                     self._append_log_view(line)
-                    # self.logger.info(line)
-
-                # update last rendered pointer
-                if buf:
-                    self._last_log_obj = buf[-1]
+                self._last_log_obj = new_last
 
         finally:
             self.after(100, self._pump_log_buffer)
@@ -892,3 +915,120 @@ class LASERLINKAPP(tk.Tk):
         except Exception as e:
             return False, f"Write failed: {e}"
 
+    # -----------------------------
+    # --------- Core logic ---------
+    # -----------------------------
+    def _start_core(self) -> None:
+        if self.cfg is None or LaserSfcBridge is None:
+            self.append_log("[CORE] LaserSfcBridge import failed -> core not started", logging.ERROR)
+            self.set_status("ERROR", "Core not available")
+            return
+
+        def on_result(status: str, laser_req: str, sfc_resp: str) -> None:
+            # chạy trong core thread -> chỉ push queue
+            try:
+                self._core_q.put((time.monotonic(), status, laser_req, sfc_resp))
+            except Exception:
+                pass
+
+        try:
+            self.bridge = LaserSfcBridge(
+                self.cfg,
+                log=self.append_log,       # thread-safe (đi qua logger)
+                on_result=on_result,
+                sfc_timeout=5.0,
+                idle_sleep=0.01,
+                break_on_reload=False,
+            )
+        except Exception as e:
+            self.append_log(f"[CORE] init failed: {e}", logging.ERROR)
+            self.set_status("ERROR", "Core init failed")
+            return
+
+        self._core_thread = threading.Thread(target=self.bridge.run_forever, daemon=True)
+        self._core_thread.start()
+        self.append_log("[CORE] started", logging.INFO)
+        self.set_status("LISTENING", "Waiting for LASER trigger...")
+
+    def _poll_core_state(self) -> None:
+        try:
+            # 1) Drain result queue (PASS/FAIL/TIMEOUT/...)
+            while True:
+                try:
+                    ts, status, laser_req, sfc_resp = self._core_q.get_nowait()
+                except Exception:
+                    break
+
+                self._last_result_ts = ts
+                self._last_result_status = (status or "").upper()
+
+                # Flash PASS/FAIL rõ ràng cho công nhân
+                if self._last_result_status in ("PASS", "FAIL"):
+                    desc = f"SFC: {sfc_resp}"
+                    self.set_status(self._last_result_status, desc[:120])
+                elif self._last_result_status in ("TIMEOUT", "SFC_ERROR"):
+                    self.set_status("ERROR", f"{status}: {str(sfc_resp)[:120]}")
+                else:
+                    self.set_status("WARN", f"{status}: {str(sfc_resp)[:120]}")
+
+            # 2) Nếu không có “result flash” gần đây -> bám theo mode (Listening/Testing/Error)
+            if self.bridge is not None:
+                now = time.monotonic()
+                flash_active = (now - float(self._last_result_ts)) < 1.2 and self._last_result_status in ("PASS", "FAIL")
+
+                if not flash_active:
+                    ok, com_laser, txt = self.bridge.get_status_triplet()
+                    mode = (self.bridge.get_mode() or "").upper()
+
+                    if mode == "LISTENING":
+                        self.set_status("LISTENING", f"LASER={com_laser}")
+                    elif mode == "TESTING":
+                        st, last_req, _ = self.bridge.get_last_result()
+                        self.set_status("TESTING", f"LASER->SFC... ({str(last_req)[:60]})")
+                    elif mode == "ERROR":
+                        self.set_status("ERROR", self.bridge.get_last_error()[:140])
+                    elif mode == "STOPPED":
+                        self.set_status("STOPPED", "Core stopped")
+                    else:
+                        self.set_status("STANDBY", txt[:140])
+
+        except Exception as e:
+            # tuyệt đối không để poll làm crash UI
+            try:
+                self.append_log(f"[UI] _poll_core_state error: {e}", logging.ERROR)
+            except Exception:
+                pass
+        finally:
+            self.after(100, self._poll_core_state)
+
+    def _on_close(self) -> None:
+        # Không join trực tiếp (sẽ freeze UI). Request stop rồi poll thread.
+        try:
+            self.set_status("STOPPED", "Stopping core...")
+        except Exception:
+            pass
+
+        try:
+            if self.bridge is not None:
+                self.bridge.request_stop()
+        except Exception:
+            pass
+
+        self._close_deadline = time.monotonic() + 6.0  # tối đa chờ 6s (read_timeout)
+        self.after(50, self._finalize_close)
+
+    def _finalize_close(self) -> None:
+        try:
+            th = self._core_thread
+            if th and th.is_alive():
+                # quá deadline thì vẫn đóng UI (core thread là daemon)
+                if time.monotonic() < getattr(self, "_close_deadline", 0):
+                    self.after(50, self._finalize_close)
+                    return
+            self.destroy()
+        except Exception:
+            # fallback cực đoan: vẫn thoát
+            try:
+                self.destroy()
+            except Exception:
+                pass

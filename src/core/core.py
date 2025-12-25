@@ -1,9 +1,9 @@
 # src.core.core.py
+from __future__ import annotations
 import re
 import time
 import threading
 from src.core import *
-from src.utils.buffer_logger import build_log_buffer
 
 # -------------------------------
 # Frame assembler (gom readline -> 1 frame)
@@ -321,8 +321,10 @@ class LaserSfcBridge:
                 ev = self.step()
                 if ev == "RELOAD_BREAK":
                     break
-                if ev == "IDLE":
-                    time.sleep(self.idle_sleep)
+
+                # ngủ nhẹ không chỉ khi IDLE, mà cả khi ERROR để tránh spin CPU
+                if ev in ("IDLE", "ERROR", "SFC_ERROR", "SFC_TIMEOUT"):
+                    time.sleep(max(self.idle_sleep, 0.05))
         finally:
             self._running = False
             self._mode = "Stopped"
