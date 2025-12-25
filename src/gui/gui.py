@@ -642,14 +642,27 @@ class LASERLINKAPP(tk.Tk):
             ("WARN", "Retrying / Port unstable..."),
             ("ERROR", "Timeout / No response..."),
         ]
-        # TODO: Display ports get_config_snapshot()
-        # Build left panel widgets
-        # ttk.Label(self.left, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
-        # self.label_com_laser = ttk.Label(self.left, text=f"COM_LASER: {str(self.cfg.com.COM_LASER)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
-        # self.label_com_sfc = ttk.Label(self.left, text=f"COM_SFC: {str(self.cfg.com.COM_SFC)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
-        # self.label_com_scan = ttk.Label(self.left, text=f"COM_SCAN: {str(self.cfg.com.COM_SCAN)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
-        # ttk.Label(self.left, text=self.config_path.name, style="Muted.TLabel", wraplength=220).pack(anchor="w", pady=(4, 12))
+        # ---- Left panel: CONFIG summary (always visible) ----
+        cfg_box = ttk.Frame(self.left, style="InCard.TFrame")
+        cfg_box.pack(fill="x")
 
+
+        ttk.Label(cfg_box, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
+
+        self._v_cfg_laser = tk.StringVar(value="")
+        self._v_cfg_sfc   = tk.StringVar(value="")
+        self._v_cfg_scan  = tk.StringVar(value="")
+
+        ttk.Label(cfg_box, textvariable=self._v_cfg_laser, style="Muted.TLabel", wraplength=330)\
+            .pack(anchor="w", pady=(6, 0))
+        ttk.Label(cfg_box, textvariable=self._v_cfg_sfc, style="Muted.TLabel", wraplength=330)\
+            .pack(anchor="w", pady=(3, 0))
+        ttk.Label(cfg_box, textvariable=self._v_cfg_scan, style="Muted.TLabel", wraplength=330)\
+            .pack(anchor="w", pady=(3, 0))
+
+        # initial + periodic refresh
+        self._refresh_config_summary()
+        self.after(800, self._tick_config_summary)
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
         btns = ttk.Frame(self.left, style="InCard.TFrame")
@@ -765,6 +778,26 @@ class LASERLINKAPP(tk.Tk):
     # -----------------------------
     # UI helpers
     # -----------------------------
+
+    def _refresh_config_summary(self) -> None:
+        snap = self.get_config_snapshot()
+
+        self._v_cfg_laser.set(f"LASER: {snap.get('COM_LASER','')}:{snap.get('BAUDRATE_LASER','')}")
+        self._v_cfg_sfc.set(  f"SFC:   {snap.get('COM_SFC','')}:{snap.get('BAUDRATE_SFC','')}")
+        self._v_cfg_scan.set( f"SCAN:  {snap.get('COM_SCAN','')}:{snap.get('BAUDRATE_SCAN','')}")
+
+    def _tick_config_summary(self) -> None:
+        try:
+            # nếu config đổi từ ngoài (hoặc sau Save) thì UI tự cập nhật
+            if self.cfg is not None:
+                self.cfg.reload_if_changed()
+            self._refresh_config_summary()
+        except Exception:
+            pass
+        finally:
+            self.after(800, self._tick_config_summary)
+
+
     def _pump_log_buffer(self):
         try:
             buf = getattr(self, "log_buff", None)
@@ -922,6 +955,7 @@ class LASERLINKAPP(tk.Tk):
 
         try:
             self.cfg.reload(force=True)
+            self._refresh_config_summary()
             self.logger.info("[OK] Reloaded config.ini via CFG")
             self.set_status("OK", "Config loaded")
         except Exception as e:
@@ -946,6 +980,7 @@ class LASERLINKAPP(tk.Tk):
                 }, make_backup=True, reload_after=True))
                 if ok:
                     self.logger.info("[OK] Saved config.ini via CFG.update_sections()")
+                    self._refresh_config_summary()
                     return True, ""
                 return False, "CFG.update_sections() returned False"
 
