@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import time
 from pathlib import Path
 from src.utils.resource_path import app_dir
@@ -21,9 +22,9 @@ import re
 # ---------- DEFAULT FIELDS (có thể mở rộng sau) ----------
 DEFAULTS: Dict[str, Dict[str, str]] = {
     "COM": {
-        "COM_LASER": "COM1",
-        "COM_SFC": "COM2",
-        "COM_SCAN": "COM3",
+        "COM_LASER": "COM3",
+        "COM_SFC": "COM8",
+        "COM_SCAN": "COM5",
     },
     "BAUDRATE": {
         "BAUDRATE_LASER": "9600",

@@ -77,7 +77,9 @@ MUTED = "#6B7280"
 OK_FG = "#0F5132"
 ERR_FG = "#842029"
 WARN_FG = "#7A4B00"
-
+EDIT_KEY_ENV = "LASERLINK_EDIT_KEY"
+DEFAULT_EDIT_KEY = "Laserlinkfii168!!"          # đổi tuỳ bạn
+EDIT_UNLOCK_TTL_SEC = 3       # unlock tạm 3 giây sau khi nhập đúng
 
 # -----------------------------
 # Config (source of truth = src.core.CFG)
@@ -279,6 +281,53 @@ class ErrorDialog(BaseDialog):
         lbl.pack(fill="x", expand=False)
 
         ttk.Button(self.footer, text="Đóng", command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
+
+class EditKeyDialog(BaseDialog):
+    """Prompt user for a key before allowing config edits."""
+    dismiss_on_backdrop = False
+
+    def __init__(self, host: DialogHost, app: "LASERLINKAPP", *, on_success):
+        super().__init__(host, "ENTER KEY", width=520)
+        self.app = app
+        self._on_success = on_success
+
+        wrap = ttk.Frame(self.body, style="InCard.TFrame")
+        wrap.pack(fill="x", expand=False)
+
+        ttk.Label(
+            wrap,
+            text="Nhập mã key để mở chức năng sửa config.ini",
+            style="Muted.TLabel",
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w")
+
+        self.v_key = tk.StringVar(value="")
+        self.ent = ttk.Entry(wrap, textvariable=self.v_key, show="•")
+        self.ent.pack(fill="x", pady=(10, 0))
+
+        self.lbl_err = ttk.Label(wrap, text="", style="Error.TLabel", wraplength=480, justify="left")
+        self.lbl_err.pack(anchor="w", pady=(8, 0))
+
+        right = ttk.Frame(self.footer, style="InCard.TFrame")
+        right.grid(row=0, column=0, sticky="e")
+        ttk.Button(right, text="Cancel", command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
+        ttk.Button(right, text="OK", command=self._ok, width=10).pack(side="right")
+
+        self.ent.bind("<Return>", lambda _e: self._ok())
+        self.ent.focus_set()
+
+    def _ok(self):
+        key = (self.v_key.get() or "").strip()
+        if self.app._check_edit_key(key):
+            self.app._unlock_edit()
+            self.host.close_top()
+            self._on_success()
+            return
+
+        self.v_key.set("")
+        self.lbl_err.configure(text="Sai key. Vui lòng thử lại hoặc liên hệ TE/Engineer. 5935 - 70626")
+        self.ent.focus_set()
 
 
 class EditConfigDialog(BaseDialog):
@@ -504,6 +553,11 @@ class LASERLINKAPP(tk.Tk):
         # 2) attach CFG logging -> goes into logger -> into log_buff
         self.cfg = CFG
         self.config_path = Path(getattr(self.cfg, "config_path", app_dir() / "config.ini"))
+
+        # --- edit-config lock ---
+        self._edit_key: str = os.environ.get(EDIT_KEY_ENV, DEFAULT_EDIT_KEY)
+        self._edit_unlocked_until: float = 0.0
+
         if self.cfg is not None and hasattr(self.cfg, "set_logger"):
             self.cfg.set_logger(self.append_log)
         # if self.cfg is not None and hasattr(self.cfg, "set_logger"):
@@ -532,8 +586,9 @@ class LASERLINKAPP(tk.Tk):
         ]
 
         # Build left panel widgets
-        ttk.Label(self.left, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(self.left, text=str(self.config_path), style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
+        # ttk.Label(self.left, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
+        # ttk.Label(self.left, text=str(self.config_path), style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
+        # ttk.Label(self.left, text=self.config_path.name, style="Muted.TLabel", wraplength=220).pack(anchor="w", pady=(4, 12))
 
         btns = ttk.Frame(self.left, style="InCard.TFrame")
         btns.pack(fill="x")
@@ -544,8 +599,9 @@ class LASERLINKAPP(tk.Tk):
 
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
-        self.btn_mock = ttk.Button(self.left, text="Start Mock UX", command=self._toggle_mock)
+        self.btn_mock = ttk.Button(self.left, text="Start Mock UX (disabled)", command=self._toggle_mock)
         self.btn_mock.pack(fill="x")
+        self.btn_mock.configure(state="disabled")  # disable mock UX for now
 
         # Right panel: log
         ttk.Label(self.right, text="LOG", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
@@ -570,6 +626,15 @@ class LASERLINKAPP(tk.Tk):
             return p
         # Prefer app_dir() to keep config next to exe/entry
         return app_dir() / p
+
+    def _check_edit_key(self, key: str) -> bool:
+        return (key or "").strip() == (self._edit_key or "").strip()
+
+    def _unlock_edit(self) -> None:
+        self._edit_unlocked_until = time.monotonic() + EDIT_UNLOCK_TTL_SEC
+
+    def _is_edit_unlocked(self) -> bool:
+        return time.monotonic() < float(getattr(self, "_edit_unlocked_until", 0.0))
 
     # -----------------------------
     # Mock UX / Status testing
@@ -599,6 +664,7 @@ class LASERLINKAPP(tk.Tk):
         tick()
 
     def _stop_mock_ui(self) -> None:
+        return None
         self._mock_running = False
         self.btn_mock.configure(text="Start Mock UX")
         if self._mock_after_id:
@@ -609,6 +675,7 @@ class LASERLINKAPP(tk.Tk):
             self._mock_after_id = None
 
     def _toggle_mock(self) -> None:
+        return None
         if self._mock_running:
             self._stop_mock_ui()
             self.set_status("IDLE", "Mock stopped.")
@@ -735,7 +802,7 @@ class LASERLINKAPP(tk.Tk):
     def open_info(self):
         info: list[str] = []
         info.append("COM Config Utility (Tkinter)")
-        info.append(f"Config path: {self.config_path}")
+        info.append(f"Config path: {self.config_path.name}")
         info.append("")
         info.append("Detected ports:")
         ports = list_ports()
@@ -748,7 +815,14 @@ class LASERLINKAPP(tk.Tk):
         self.dialog_host.show(InfoDialog(self.dialog_host, "\n".join(info)))
 
     def open_edit_config(self):
-        self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
+        if self._is_edit_unlocked():
+            self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
+            return
+
+        def _go_edit():
+            self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
+
+        self.dialog_host.show(EditKeyDialog(self.dialog_host, self, on_success=_go_edit))
 
     def get_config_snapshot(self) -> dict[str, str]:
         """
@@ -818,9 +892,3 @@ class LASERLINKAPP(tk.Tk):
         except Exception as e:
             return False, f"Write failed: {e}"
 
-
-if __name__ == "__main__":
-    app = LASERLINKAPP()
-    if ("--mock" in sys.argv) or (os.environ.get("LASERLINK_MOCK_UI", "").strip() == "1"):
-        app.init_mock_ui(True)
-    app.mainloop()
