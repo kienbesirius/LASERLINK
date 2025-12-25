@@ -12,8 +12,6 @@ from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
 from typing import Optional
 
-from typer import style
-
 # -----------------------------------------------------------------------------
 # Path bootstrap: make sure we can import `src.*` when running this file directly.
 # This file is expected at: <project_root>/src/gui/gui.py
@@ -49,6 +47,43 @@ try:
 except Exception:
     _HAS_SERIAL = False
 
+
+def _is_valid_port_name(p: str) -> bool:
+    if not p:
+        return False
+    s = p.strip()
+    # Windows: COM1, COM2...
+    if re.match(r"^COM\d+$", s, flags=re.IGNORECASE):
+        return True
+    # Linux: /dev/ttyUSB0 or ttyUSB0
+    if s.startswith("/dev"):
+        return True
+    return False
+
+def list_ports() -> list[str]:
+    """
+    Return only ports we actually want to show: COMx or ttyUSBx.
+    If pyserial exists but returns weird/empty -> return [] (GUI will fallback).
+    """
+    if not _HAS_SERIAL:
+        return []
+    try:
+        raw = [p.device for p in serial.tools.list_ports.comports()]
+        out = [x for x in raw if _is_valid_port_name(str(x))]
+        # optional: stable ordering
+        def key(x: str):
+            xs = x.upper()
+            if xs.startswith("COM"):
+                try:
+                    return (0, int(re.findall(r"\d+", xs)[0]))
+                except Exception:
+                    return (0, 9999)
+            return (1, xs)
+        out.sort(key=key)
+        return out
+    except Exception:
+        return []
+    
 try:
     from src.utils.buffer_logger import build_log_buffer
 except Exception:
@@ -98,14 +133,6 @@ try:
     from src.core import CFG  # type: ignore
 except Exception:
     CFG = None  # type: ignore
-
-
-def list_ports() -> list[str]:
-    if not _HAS_SERIAL:
-        return []
-    return [p.device for p in serial.tools.list_ports.comports()]
-
-
 
 
 class DialogHost(ttk.Frame):
@@ -346,8 +373,6 @@ class EditConfigDialog(BaseDialog):
         super().__init__(host, "EDIT CONFIG.INI", width=740)
         self.app = app
 
-        ports = [""] + list_ports()
-
         # Vars
         snap = app.get_config_snapshot()
         self.v_com_laser = tk.StringVar(value=snap.get("COM_LASER", ""))
@@ -358,6 +383,24 @@ class EditConfigDialog(BaseDialog):
         self.v_baud_sfc   = tk.StringVar(value=str(snap.get("BAUDRATE_SFC", "9600")))
         self.v_baud_scan  = tk.StringVar(value=str(snap.get("BAUDRATE_SCAN", "9600")))
 
+        # ports = [""] + list_ports()
+        valid_ports = list_ports()  # đã lọc COM/ttyUSB
+        has_valid_ports = bool(valid_ports)
+
+        # Nếu không có port hợp lệ => reset tất cả box COM để tránh hiển thị giá trị sai/stale
+        if not has_valid_ports:
+            self.v_com_laser.set(snap.get("COM_LASER", ""))
+            self.v_com_sfc.set(snap.get("COM_SFC", ""))
+            self.v_com_scan.set(snap.get("COM_SCAN", ""))
+        else:
+            # Có ports hợp lệ -> nếu config đang set port không nằm trong list -> reset field đó
+            if (self.v_com_laser.get() or "").strip() not in valid_ports:
+                self.v_com_laser.set(snap.get("COM_LASER", ""))
+            if (self.v_com_sfc.get() or "").strip() not in valid_ports:
+                self.v_com_sfc.set(snap.get("COM_SFC", ""))
+            if (self.v_com_scan.get() or "").strip() not in valid_ports:
+                self.v_com_scan.set(snap.get("COM_SCAN", ""))
+        
 
         grid = ttk.Frame(self.body, style="InCard.TFrame")
         grid.pack(fill="both", expand=True)
@@ -366,15 +409,17 @@ class EditConfigDialog(BaseDialog):
 
         def row(r: int, label: str, var: tk.StringVar, choices: Optional[list[str]] = None):
             ttk.Label(grid, text=label, style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=6, padx=(0, 10))
-            if choices:
+            if choices is not None:
                 cb = ttk.Combobox(grid, textvariable=var, values=choices, state="readonly")
                 cb.grid(row=r, column=1, sticky="ew", pady=6)
             else:
                 ent = ttk.Entry(grid, textvariable=var)
                 ent.grid(row=r, column=1, sticky="ew", pady=6)
 
+
         # If no pyserial, show Entry widgets.
-        port_choices = ports if ports and _HAS_SERIAL else None
+        # port_choices = ports if ports and _HAS_SERIAL else None
+        port_choices = ([""] + valid_ports) if has_valid_ports else None
         row(0, "COM_LASER", self.v_com_laser, port_choices)
         row(1, "COM_SFC", self.v_com_sfc, port_choices)
         row(2, "COM_SCAN", self.v_com_scan, port_choices)
@@ -385,9 +430,14 @@ class EditConfigDialog(BaseDialog):
         row(5, "BAUDRATE_SFC", self.v_baud_sfc, None)
         row(6, "BAUDRATE_SCAN", self.v_baud_scan, None)
 
+        hint_text = (
+            "Tip: Không detect được port (pyserial OK nhưng list rỗng) -> các ô COM sẽ là entry để bạn nhập tay."
+            if port_choices is None
+            else "Tip: Chọn COM từ dropdown. Nếu không thấy port đúng, hãy nhấn Scan Ports để kiểm tra."
+        )
         hint = ttk.Label(
             self.body,
-            text="Tip: nếu máy không có pyserial thì combobox port sẽ thành entry để bạn nhập tay.",
+            text=hint_text,
             style="Muted.TLabel",
         )
         hint.pack(anchor="w", pady=(10, 0))
@@ -592,17 +642,21 @@ class LASERLINKAPP(tk.Tk):
             ("WARN", "Retrying / Port unstable..."),
             ("ERROR", "Timeout / No response..."),
         ]
-
+        # TODO: Display ports get_config_snapshot()
         # Build left panel widgets
         # ttk.Label(self.left, text="CONFIG", style="Muted.TLabel").pack(anchor="w")
-        # ttk.Label(self.left, text=str(self.config_path), style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(4, 12))
+        # self.label_com_laser = ttk.Label(self.left, text=f"COM_LASER: {str(self.cfg.com.COM_LASER)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
+        # self.label_com_sfc = ttk.Label(self.left, text=f"COM_SFC: {str(self.cfg.com.COM_SFC)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
+        # self.label_com_scan = ttk.Label(self.left, text=f"COM_SCAN: {str(self.cfg.com.COM_SCAN)}", style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(3, 3))
         # ttk.Label(self.left, text=self.config_path.name, style="Muted.TLabel", wraplength=220).pack(anchor="w", pady=(4, 12))
+
+        ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
         btns = ttk.Frame(self.left, style="InCard.TFrame")
         btns.pack(fill="x")
 
         ttk.Button(btns, text="Reload", command=self.reload_config).pack(fill="x")
-        ttk.Button(btns, text="Edit comfig", command=self.open_edit_config).pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="Edit config.ini", command=self.open_edit_config).pack(fill="x", pady=(8, 0))
         ttk.Button(btns, text="Info", command=self.open_info).pack(fill="x", pady=(8, 0))
 
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
@@ -785,21 +839,6 @@ class LASERLINKAPP(tk.Tk):
 
         self.log.see("end")
         self.log.configure(state="disabled")
-
-    # def set_status(self, code: str, desc: str = ""):
-    #     code_u = (code or "").upper()
-    #     self.status_big.configure(text=code_u)
-    #     self.status_desc.configure(text=desc or "")
-
-    #     # Simple status styling (foreground only to avoid ttk theme fights)
-    #     if code_u in ("OK", "PASS", "READY"):
-    #         self._set_status_colors(OK_FG)
-    #     elif code_u in ("ERROR", "FAIL"):
-    #         self._set_status_colors(ERR_FG)
-    #     elif code_u in ("WARN", "WARNING"):
-    #         self._set_status_colors(WARN_FG)
-    #     else:
-    #         self._set_status_colors(TEXT)
 
     def _set_status_colors(self, fg: str):
         self.status_big.configure(foreground=fg)
