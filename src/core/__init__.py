@@ -98,8 +98,8 @@ def normalize_windows_com_port(port: str) -> str:
     if p.upper().startswith("COM"):
         # COM10+ an toàn hơn với prefix này
         m = re.match(r"^(COM)(\d+)$", p, re.IGNORECASE)
-        if m and int(m.group(2)) >= 10 and not p.startswith("\\\\.\\"):
-            return "\\\\.\\" + p
+        # if m and int(m.group(2)) >= 10 and not p.startswith("\\\\.\\"):
+        #     return "\\\\.\\" + p
     return p
 
 

@@ -8,15 +8,17 @@ from pathlib import Path
 from typing import Mapping, List, Union, Callable, Optional
 
 PathLike = Union[str, os.PathLike, Path]
-
+# TÌM THƯ MỤC SRC
 src = Path(__file__).resolve()
+root = Path(__file__).resolve().parent.parent.parent 
 while not src.name.endswith("src") and not src.name.startswith("src"):
     SRC_PATH = src = src.parent
+    if(root.name == src.name):
+        break
 
 ASSETS_PATH = SRC_PATH / "assets"
 ICONS_PATH = ASSETS_PATH / "icons"
 IMAGES_PATH = ASSETS_PATH / "images"
-PORTABLE_PY_PATH = ASSETS_PATH / "win-py310"
 
 def app_dir() -> Path:
     """Folder cài đặt: nơi đặt entry.py (dev) hoặc nơi đặt exe (bundled)."""
@@ -47,7 +49,7 @@ class MkdirError:
 
 def ensure_local_directories(
     folders: Mapping[str, PathLike]
-) -> bool:
+) -> tuple[bool, list[MkdirError]]:
     """
     Tạo các thư mục local nếu chưa tồn tại.
 
