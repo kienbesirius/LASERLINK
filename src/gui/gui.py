@@ -8,6 +8,7 @@ import threading
 import queue
 import tkinter as tk
 from tkinter import ttk
+import tkinter.font as tkfont
 from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
 from typing import Optional, Type, Any
@@ -132,7 +133,7 @@ EDIT_UNLOCK_TTL_SEC = 3       # unlock tạm 3 giây sau khi nhập đúng
 # We intentionally DO NOT maintain a duplicate schema/defaults in GUI.
 # All COM/BAUDRATE/RULES should be read & written via the singleton CFG in src.core.
 try:
-    from src.core import CFG  # type: ignore
+    from src.core import CFG, send_text_and_wait  # type: ignore
 except Exception:
     CFG = None  # type: ignore
 
@@ -700,6 +701,25 @@ class EditConfigDialog(BaseDialog):
             self.host.show(ErrorDialog(self.host, "SAVE FAILED", msg))
 
 
+
+# -----------------------------
+# Flow Thread
+# -----------------------------
+_RX_NEEDPSN = re.compile(r"NEEDPSN\d+", re.IGNORECASE)
+
+def infer_status(text: str) -> str | None:
+    up = (text or "").upper()
+    # ưu tiên FAIL trước
+    if "PASSED=0" in up or "FAIL" in up or "ERRO" in up:
+        return "FAIL"
+    if "PASSED=1" in up or " PASS" in up or up.endswith("PASS"):
+        return "PASS"
+    return None
+
+def find_needpsn(text: str) -> str | None:
+    m = _RX_NEEDPSN.search(text or "")
+    return m.group(0).upper() if m else None
+
 # -----------------------------
 # Main App
 # -----------------------------
@@ -710,7 +730,7 @@ class LASERLINKAPP(tk.Tk):
         self.configure(bg=BG)
 
         # BookyApp-ish min/max sizing
-        self.minsize(980, 640)
+        self.minsize(1280, 820)
         self.maxsize(1280, 820)
 
         # ttk theme
@@ -778,8 +798,9 @@ class LASERLINKAPP(tk.Tk):
         self.container.columnconfigure(0, weight=1)
         self.container.rowconfigure(0, weight=0)  # status
         self.container.rowconfigure(1, weight=0)  # ✅ model row
-        self.container.rowconfigure(2, weight=1)  # content grows
-        self.container.rowconfigure(3, weight=0)  # footer
+        self.container.rowconfigure(2, weight=0)  # ✅ NEW: mo + scan row
+        self.container.rowconfigure(3, weight=1)  # content grows
+        self.container.rowconfigure(4, weight=0)  # footer
 
         # Header: Status card
         self.status_card = ttk.Frame(self.container, style="StatusCard.TFrame", padding=16)
@@ -817,10 +838,79 @@ class LASERLINKAPP(tk.Tk):
         ttk.Button(btns, text="Edit Models", style="Flat.TButton", takefocus=False, command=lambda: self.open_edit("models")).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Refresh", style="Flat.TButton", takefocus=False, command=self._refresh_model_picker).pack(side="left")
 
+        # MO - Scan
+        # -------------------------
+        # ✅ MO + SCAN row (2 columns)
+        # -------------------------
+        
+        # -------------------------
+        # ✅ MO + Scan (new layout)
+        # -------------------------
+        self.mo_scan_card = ttk.Frame(self.container, style="Card.TFrame", padding=14)
+        self.mo_scan_card.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        self.mo_scan_card.columnconfigure(0, weight=1)
+
+        # fonts
+        base_font  = tkfont.nametofont("TkDefaultFont")
+        family     = base_font.actual("family")
+        base_size  = int(base_font.actual("size"))
+
+        title_size = max(base_size + 6, 16)
+        scan_size  = min(max(base_size + 22, 30), 46)  # 30~46 là hợp lý
+
+        style.configure("ScanTitle.TLabel", font=(family, title_size, "bold"))
+        style.configure("Scan.TEntry",      font=(family, scan_size,  "bold"))
+
+        # ---- Row 0: MO + status (same line)
+        self.mo_row = ttk.Frame(self.mo_scan_card, style="TFrame")
+        self.mo_row.grid(row=0, column=0, sticky="ew")
+        self.mo_row.columnconfigure(2, weight=1)
+
+        ttk.Label(self.mo_row, text="MO", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+
+        self._v_mo = tk.StringVar(value="")
+        self.cb_mo = ttk.Combobox(self.mo_row, textvariable=self._v_mo, state="normal", width=22)
+        self.cb_mo.grid(row=0, column=1, sticky="w", padx=(10, 12))
+        self.cb_mo.bind("<<ComboboxSelected>>", lambda _e: self._on_mo_selected())
+        self.cb_mo.bind("<Return>", lambda _e: self._on_mo_enter())
+
+        self._mo_mode_auto_latest = True   # ✅ startup = auto latest
+        self._selected_mo_runtime = ""     # ✅ locked selection for this app session
+
+        self._v_mo_status = tk.StringVar(value="")  # ✅ status nằm cùng dòng MO
+        self.lbl_mo_status = ttk.Label(self.mo_row, textvariable=self._v_mo_status, style="Muted.TLabel")
+        self.lbl_mo_status.grid(row=0, column=2, sticky="ew")
+
+        # ---- Row 1: centered title
+        ttk.Label(self.mo_scan_card, text="Pls Scan Box Code (H)", style="ScanTitle.TLabel", anchor="center")\
+        .grid(row=1, column=0, sticky="ew", pady=(12, 8))
+
+        # ---- Row 2: big scan entry
+        self._v_h_scan = tk.StringVar(value="")
+        self.ent_h_scan = ttk.Entry(
+        self.mo_scan_card,
+            textvariable=self._v_h_scan,
+            style="Scan.TEntry",
+            font=(family, scan_size, "bold"),   # ✅ force apply
+            justify="center",
+        )
+        self.ent_h_scan.grid(row=2, column=0, sticky="ew", ipady=10)
+
+        self.ent_h_scan.bind("<Return>", lambda _e: self._commit_h_scan(immediate=True))
+
+        # scan debounce state
+        self.H_code: str = ""
+        self._hscan_after_id = None
+        self._hscan_debounce_ms = 250
+        self._v_h_scan.trace_add("write", lambda *_: self._on_h_scan_changed())
+        self._focus_scan()
+        # -------------------------
+        # ---------------------------
+        # -----------------------------
 
         # Content row: left config + right log
         self.content = ttk.Frame(self.container, style="TFrame")
-        self.content.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
+        self.content.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         self.content.columnconfigure(0, weight=0)
         self.content.columnconfigure(1, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -839,7 +929,7 @@ class LASERLINKAPP(tk.Tk):
 
         # Footer row
         self.footer = ttk.Frame(self.container, style="TFrame")
-        self.footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.footer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         self.footer.columnconfigure(0, weight=1)
 
         # Dialog host (overlay in parent)
@@ -905,6 +995,8 @@ class LASERLINKAPP(tk.Tk):
         # initial + periodic refresh
         self._refresh_config_summary()
         self.after(800, self._tick_config_summary)
+        self.after(800, self._tick_model_picker)
+        self.after(800, self._tick_mo_picker)
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
         btns = ttk.Frame(self.left, style="InCard.TFrame")
@@ -916,9 +1008,9 @@ class LASERLINKAPP(tk.Tk):
 
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
-        self.btn_mock = ttk.Button(self.left, text="Start Mock UX (disabled)", style="Flat.TButton", takefocus=False, command=self._toggle_mock)
+        self.btn_mock = ttk.Button(self.left, text="Start Mock UX", style="Flat.TButton", takefocus=False, command=self._toggle_mock)
         self.btn_mock.pack(fill="x")
-        self.btn_mock.configure(state="disabled")  # disable mock UX for now
+        # self.btn_mock.configure(state="disabled")  # disable mock UX for now
 
         # Right panel: log
         ttk.Label(self.right, text="LOG", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
@@ -937,22 +1029,66 @@ class LASERLINKAPP(tk.Tk):
         self.reload_config()
         self.set_status("IDLE", "Ready.")
 
+        # TODO
+        # ---- flow runtime (NEW) ----
+        self._flow_q: "queue.SimpleQueue[tuple[str, dict]]" = queue.SimpleQueue()
+        self._flow_thread: threading.Thread | None = None
+        self._flow_running = False
+        self._flow_lock = threading.Lock()
+        self._flow_t0 = 0.0
+
+        # poll flow events
+        self.after(50, self._poll_flow_events)
+
+        # status default for new UX
+        self.set_status("READY", "Select/Enter MO, then scan H Box Code")
+
         # ---- core runtime ----
-        self._core_q = queue.SimpleQueue()
-        self._core_thread: Optional[threading.Thread] = None
-        self.bridge = None
-        self._last_result_ts = 0.0
-        self._last_result_status = ""
+        # self._core_q = queue.SimpleQueue()
+        # self._core_thread: Optional[threading.Thread] = None
+        # self.bridge = None
+        # self._last_result_ts = 0.0
+        # self._last_result_status = ""
 
         # đảm bảo có handler đóng app
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # start core
-        self._start_core()
+        # # start core
+        # self._start_core()
 
-        # poll core state
-        self.after(100, self._poll_core_state)
+        # # poll core state
+        # self.after(100, self._poll_core_state)
 
+    # TODO: refactor enable/disable inputs
+    def disable_inputs(self):
+        try:
+            self.cb_model.configure(state="disabled")
+        except Exception:
+            pass
+        try:
+            self.cb_mo.configure(state="disabled")
+        except Exception:
+            pass
+        try:
+            self.ent_h_scan.configure(state="disabled")
+        except Exception:
+            pass
+
+    def enable_inputs(self):
+        try:
+            self.cb_model.configure(state="readonly")
+        except Exception:
+            pass
+        try:
+            # MO combobox bạn để state="normal" để nhập tay
+            self.cb_mo.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            self.ent_h_scan.configure(state="normal")
+        except Exception:
+            pass
+        self._focus_scan()
 
     def _resolve_config_path(self, config_path: str | os.PathLike[str]) -> Path:
         p = Path(config_path)
@@ -1073,6 +1209,402 @@ class LASERLINKAPP(tk.Tk):
         self._v_cfg_laser.set(f"LASER: {snap.get('COM_LASER','')}:{snap.get('BAUDRATE_LASER','')}")
         self._v_cfg_sfc.set(  f"SFC:   {snap.get('COM_SFC','')}:{snap.get('BAUDRATE_SFC','')}")
         self._v_cfg_scan.set( f"SCAN:  {snap.get('COM_SCAN','')}:{snap.get('BAUDRATE_SCAN','')}")
+
+    # -----------------------------
+    # ✅ MO picker
+    # -----------------------------
+    def _refresh_mo_picker(self, *, select: str | None = None) -> None:
+        if self.cfg is None or not hasattr(self.cfg, "get_mos"):
+            self.cb_mo.configure(values=[])
+            self._v_mo.set("")
+            self._set_mo_status("Chưa cài đặt công lệnh MO")
+            self._focus_scan()
+            return
+
+        self.cfg.reload_if_changed()
+        mos = list(self.cfg.get_mos() or [])
+        self.cb_mo.configure(values=mos)
+
+        # --- 결정: AUTO_LATEST vs LOCKED ---
+        if select:
+            # user action -> LOCKED
+            sel = select.strip()
+            self._mo_mode_auto_latest = False
+            self._selected_mo_runtime = sel
+            target = sel
+        elif not self._mo_mode_auto_latest:
+            # LOCKED
+            target = (self._selected_mo_runtime or "").strip()
+        else:
+            # AUTO_LATEST (startup default)
+            target = (self.cfg.get_latest_mo() if hasattr(self.cfg, "get_latest_mo") else "").strip()
+            if not target and mos:
+                target = mos[-1]
+
+        # normalize casing from list (case-insensitive)
+        if mos and target:
+            lower_map = {m.lower(): m for m in mos}
+            target = lower_map.get(target.lower(), target)
+
+        # if target missing -> fallback
+        if mos and (not target or target.lower() not in {m.lower() for m in mos}):
+            # AUTO mode -> fallback to latest; LOCKED mode -> keep but show warning
+            if self._mo_mode_auto_latest:
+                target = mos[-1]
+            else:
+                target = mos[-1]
+                self._set_mo_status("MO đã chọn không còn trong config → fallback sang MO mới nhất.")
+                self._selected_mo_runtime = target
+
+        self._v_mo.set(target or "")
+
+        if mos:
+            self._set_mo_status(f"Đã load MO • hiện tại: {self._v_mo.get()}")
+        else:
+            self._set_mo_status("Chưa có MO • nhập MO rồi nhấn Enter")
+
+        self._focus_scan()
+
+
+    def _on_mo_selected(self) -> None:
+        mo = (self._v_mo.get() or "").strip()
+        if not mo:
+            self._set_mo_status("MO rỗng")
+            self._focus_scan()
+            return
+
+        # ✅ lock until app ends
+        self._mo_mode_auto_latest = False
+        self._selected_mo_runtime = mo
+
+        # ✅ persist (optional but recommended)
+        if self.cfg is not None and hasattr(self.cfg, "set_last_selected_mo"):
+            self.cfg.set_last_selected_mo(mo, persist=True)
+
+        self._set_mo_status(f"Đã chọn MO: {mo} • sẵn sàng scan")
+        self.append_log(f"[OK] MO selected -> {mo}")
+        self._focus_scan()
+
+
+    def _on_mo_enter(self) -> None:
+        if self.cfg is None or not hasattr(self.cfg, "add_mo"):
+            self._v_mo_status.set("CFG chưa hỗ trợ MO (thiếu CFG.add_mo).")
+            return
+
+        import re
+        raw = self._v_mo.get() or ""
+        mo = re.sub(r"\s+", "", raw).strip()
+        if len(mo) > 21:
+            mo = mo[:21]
+        self._v_mo.set(mo)
+
+        if not mo:
+            self._v_mo_status.set("MO rỗng hoặc không hợp lệ.")
+            return
+
+        before = set(m.lower() for m in (self.cfg.get_mos() or []))
+        ok = bool(self.cfg.add_mo(mo, persist=True))  # ✅ core đã check trùng
+        if not ok:
+            self._v_mo_status.set("Lưu/Select MO thất bại.")
+            return
+
+        existed = (mo.lower() in before)
+        self._mo_mode_auto_latest = False
+        self._selected_mo_runtime = mo
+
+        self._refresh_mo_picker(select=mo)
+        self._v_mo_status.set("MO đã tồn tại → set selected" if existed else "Đã lưu MO mới → set selected")
+        self.append_log(f"[OK] MO {'selected' if existed else 'saved'} -> {mo}")
+        self._focus_scan()
+
+    # -----------------------------
+    # ✅ SCAN H Box Code debounce
+    # -----------------------------
+
+    def _focus_scan(self) -> None:
+        try:
+            self.ent_h_scan.focus_set()
+            self.ent_h_scan.selection_range(0, "end")
+            self.ent_h_scan.icursor("end")
+        except Exception:
+            pass
+
+    def _set_mo_status(self, msg: str) -> None:
+        self._v_mo_status.set(msg or "")
+
+    def _set_hscan_placeholder(self) -> None:
+        self._hscan_is_placeholder = True
+        # set placeholder text but DON'T treat as scan
+        self._v_h_scan.set(self._hscan_placeholder)
+        self.ent_h_scan.configure(style="ScanPlaceholder.TEntry")
+
+    def _hscan_on_focus_in(self, _e=None) -> None:
+        if self._hscan_is_placeholder:
+            self._hscan_is_placeholder = False
+            self._v_h_scan.set("")
+            self.ent_h_scan.configure(style="Scan.TEntry")
+
+    def _hscan_on_focus_out(self, _e=None) -> None:
+        if not (self._v_h_scan.get() or "").strip():
+            self._set_hscan_placeholder()
+
+    def _on_h_scan_changed(self) -> None:
+        if getattr(self, "_hscan_is_placeholder", False):
+            return
+
+        s = self._v_h_scan.get() or ""
+        if ("\n" in s) or ("\r" in s):
+            self._commit_h_scan(immediate=True)
+            return
+
+        if self._hscan_after_id:
+            try:
+                self.after_cancel(self._hscan_after_id)
+            except Exception:
+                pass
+            self._hscan_after_id = None
+
+        self._hscan_after_id = self.after(self._hscan_debounce_ms, lambda: self._commit_h_scan(immediate=False))
+
+
+    def _commit_h_scan(self, *, immediate: bool) -> None:
+        if getattr(self, "_hscan_is_placeholder", False):
+            return
+
+        if self._hscan_after_id:
+            try:
+                self.after_cancel(self._hscan_after_id)
+            except Exception:
+                pass
+            self._hscan_after_id = None
+
+        raw = self._v_h_scan.get() or ""
+        cleaned = raw.replace("\r", "").replace("\n", "").strip()
+        if not cleaned:
+            return
+
+        self.H_code = cleaned
+        self._v_h_scan.set(cleaned)
+        self.append_log(f"[SCAN] H_code -> {cleaned}")
+        self._start_flow_from_ui()
+
+    def _start_flow_from_ui(self) -> None:
+        # chống chạy chồng
+        with self._flow_lock:
+            if self._flow_running:
+                self.append_log("[FLOW] already running -> ignore scan", logging.WARNING)
+                return
+            self._flow_running = True
+
+        mo = (self._v_mo.get() or "").strip()
+        h  = (self.H_code or "").strip()
+        model = (self._v_model.get() or "").strip()
+
+        if not mo:
+            self.set_status("WARN", "MO is empty. Please select/enter MO.")
+            with self._flow_lock:
+                self._flow_running = False
+            self._focus_scan()
+            return
+
+        if not h:
+            self.set_status("WARN", "H is empty. Please scan again.")
+            with self._flow_lock:
+                self._flow_running = False
+            self._focus_scan()
+            return
+
+        # needpsn theo model mapping (ưu tiên config MODEL)
+        needpsn = ""
+        try:
+            if self.cfg is not None and hasattr(self.cfg, "get_model_needpsn"):
+                needpsn = (self.cfg.get_model_needpsn(model) or "").strip().upper()
+        except Exception:
+            needpsn = ""
+
+        self.disable_inputs()
+        self._flow_t0 = time.perf_counter()
+        self.set_status("TESTING", "SFC: checking MO,H ...")
+        self.append_log(f"[FLOW] START mo={mo} | h={h} | model={model} | needpsn={needpsn}")
+
+        def worker():
+            try:
+                self.flow_core(mo=mo, h=h, model=model, needpsn=needpsn)
+            except Exception as e:
+                self._flow_q.put(("DONE", {"ok": False, "status": "ERROR", "desc": str(e), "detail": ""}))
+            finally:
+                # worker end marker is always DONE event (flow_core cũng sẽ put DONE)
+                pass
+
+        self._flow_thread = threading.Thread(target=worker, daemon=True)
+        self._flow_thread.start()
+
+
+    def flow_core(self, *, mo: str, h: str, model: str, needpsn: str) -> None:
+        """
+        NEW FLOW (no laserbridge):
+        1) TX SFC: MO,H -> RX -> FAIL stop / PASS continue
+        2) TX SFC: MO,NEEDPSNxx -> RX -> FAIL stop / PASS continue
+        3) TX LASER: <raw SFC resp2> -> RX Laser (timeout=60) -> (timeout => FAIL)
+        4) TX SFC: <laser result> -> RX -> FAIL/PASS final
+        """
+        cfg = self.cfg or CFG
+        cfg.reload_if_changed()
+        com = cfg.com
+        baud = cfg.baudrate
+
+        def emit(kind: str, **payload):
+            self._flow_q.put((kind, payload))
+
+        def fail(stage: str, desc: str, detail: str = ""):
+            emit("DONE", ok=False, status="FAIL", stage=stage, desc=desc, detail=detail)
+
+        def okpass(stage: str, desc: str, detail: str = ""):
+            emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
+
+        # ---------------- 1) SFC: MO,H ----------------
+        emit("STAGE", code="TESTING", desc="SFC: checking MO,H ...", stage="SFC_MO_H_TX")
+        ok1, resp1 = send_text_and_wait(
+            f"{mo},{h}",
+            port=com.COM_SFC,
+            baudrate=baud.BAUDRATE_SFC,
+            write_append_crlf=True,
+            read_timeout=8.0,
+            log_callback=self.append_log,
+        )
+        if not ok1:
+            return fail("SFC_MO_H", "SFC no response / timeout", resp1)
+
+        st1 = infer_status(resp1) or "UNKNOWN"
+        emit("LOG", text=f"[SFC][MO,H] {resp1}")
+        if st1 == "FAIL":
+            return fail("SFC_MO_H", "SFC returned FAIL", resp1)
+
+        # ---------------- 2) SFC: MO,NEEDPSNxx ----------------
+        # nếu needpsn không có từ model mapping -> thử parse từ resp1
+        if not needpsn:
+            needpsn = find_needpsn(resp1) or ""
+        if not needpsn:
+            # bạn có thể đổi thành FAIL hoặc WARN tùy spec; mình fail để khỏi chạy sai
+            return fail("NEEDPSN", f"Missing NEEDPSN for model={model}", resp1)
+
+        emit("STAGE", code="TESTING", desc=f"SFC: request {needpsn} ...", stage="SFC_NEEDPSN_TX")
+        ok2, resp2 = send_text_and_wait(
+            f"{mo},{needpsn}",
+            port=com.COM_SFC,
+            baudrate=baud.BAUDRATE_SFC,
+            write_append_crlf=True,
+            read_timeout=8.0,
+            log_callback=self.append_log,
+        )
+        if not ok2:
+            return fail("SFC_NEEDPSN", "SFC no response / timeout", resp2)
+
+        st2 = infer_status(resp2) or "UNKNOWN"
+        emit("LOG", text=f"[SFC][{needpsn}] {resp2}")
+        if st2 == "FAIL":
+            return fail("SFC_NEEDPSN", "SFC returned FAIL", resp2)
+
+        # ---------------- 3) LASER: send SFC resp2 (timeout 60s) ----------------
+        emit("STAGE", code="TESTING", desc="LASER: running ... (timeout 60s)", stage="LASER_TX")
+        ok3, laser_resp = send_text_and_wait(
+            resp2,
+            port=com.COM_LASER,
+            baudrate=baud.BAUDRATE_LASER,
+            write_append_crlf=True,
+            read_timeout=60.0,
+            log_callback=self.append_log,
+        )
+        if not ok3:
+            return fail("LASER", "LASER timeout / no response", laser_resp)
+
+        emit("LOG", text=f"[LASER][RX] {laser_resp}")
+
+        # ---------------- 4) SFC final: send laser result ----------------
+        emit("STAGE", code="TESTING", desc="SFC: finalizing ...", stage="SFC_FINAL_TX")
+        ok4, resp4 = send_text_and_wait(
+            laser_resp,
+            port=com.COM_SFC,
+            baudrate=baud.BAUDRATE_SFC,
+            write_append_crlf=True,
+            read_timeout=10.0,
+            log_callback=self.append_log,
+        )
+        if not ok4:
+            return fail("SFC_FINAL", "SFC no response / timeout", resp4)
+
+        st4 = infer_status(resp4) or "UNKNOWN"
+        emit("LOG", text=f"[SFC][FINAL] {resp4}")
+
+        if st4 == "PASS":
+            return okpass("DONE", "PASS", resp4)
+        return fail("SFC_FINAL", "FAIL", resp4)
+
+    def _poll_flow_events(self) -> None:
+        try:
+            while True:
+                try:
+                    kind, payload = self._flow_q.get_nowait()
+                except Exception:
+                    break
+
+                if kind == "LOG":
+                    self.append_log(payload.get("text", ""))
+
+                elif kind == "STAGE":
+                    code = payload.get("code", "TESTING")
+                    desc = payload.get("desc", "")
+                    self.set_status(code, desc)
+
+                elif kind == "DONE":
+                    ok = bool(payload.get("ok", False))
+                    status = payload.get("status", "FAIL")
+                    stage = payload.get("stage", "")
+                    desc = payload.get("desc", "")
+                    detail = payload.get("detail", "")
+
+                    dt = time.perf_counter() - float(getattr(self, "_flow_t0", time.perf_counter()))
+                    self.append_log(f"[FLOW] DONE status={status} stage={stage} dt={dt:.3f}s")
+                    if detail:
+                        self.append_log(f"[FLOW] DETAIL: {detail}")
+
+                    if ok:
+                        self.set_status("PASS", f"{desc} • {dt:.2f}s")
+                    else:
+                        self.set_status("FAIL", f"{desc} • {dt:.2f}s")
+
+                    # reset scan box for next
+                    try:
+                        self._v_h_scan.set("")
+                        self.H_code = ""
+                    except Exception:
+                        pass
+
+                    self.enable_inputs()
+
+                    with self._flow_lock:
+                        self._flow_running = False
+
+        except Exception as e:
+            # không để poll crash UI
+            try:
+                self.append_log(f"[UI] _poll_flow_events error: {e}", logging.ERROR)
+            except Exception:
+                pass
+        finally:
+            self.after(50, self._poll_flow_events)
+
+    def _tick_mo_picker(self) -> None:
+        try:
+            changed = False
+            if self.cfg is not None:
+                changed = bool(self.cfg.reload_if_changed())
+            if changed:
+                self._refresh_mo_picker()
+        except Exception:
+            pass
+        finally:
+            self.after(800, self._tick_mo_picker)
 
     def _tick_model_picker(self) -> None:
         try:
@@ -1291,7 +1823,10 @@ class LASERLINKAPP(tk.Tk):
         try:
             self.cfg.reload(force=True)
             self._refresh_config_summary()
-            self.after(800, self._tick_model_picker)
+            self._refresh_model_picker()
+            self._refresh_mo_picker()
+            # self.after(800, self._tick_model_picker)
+            # self.after(800, self._tick_mo_picker)
             self.logger.info("[OK] Reloaded config.ini via CFG")
             self.set_status("OK", "Config loaded")
         except Exception as e:
@@ -1328,117 +1863,117 @@ class LASERLINKAPP(tk.Tk):
     # -----------------------------
     # --------- Core logic ---------
     # -----------------------------
-    def _start_core(self) -> None:
-        if self.cfg is None or LaserSfcBridge is None:
-            self.append_log("[CORE] LaserSfcBridge import failed -> core not started", logging.ERROR)
-            self.set_status("ERROR", "Core not available")
-            return
+    # def _start_core(self) -> None:
+    #     if self.cfg is None or LaserSfcBridge is None:
+    #         self.append_log("[CORE] LaserSfcBridge import failed -> core not started", logging.ERROR)
+    #         self.set_status("ERROR", "Core not available")
+    #         return
 
-        def on_result(status: str, laser_req: str, sfc_resp: str) -> None:
-            # chạy trong core thread -> chỉ push queue
-            try:
-                self._core_q.put((time.monotonic(), status, laser_req, sfc_resp))
-            except Exception:
-                pass
+    #     def on_result(status: str, laser_req: str, sfc_resp: str) -> None:
+    #         # chạy trong core thread -> chỉ push queue
+    #         try:
+    #             self._core_q.put((time.monotonic(), status, laser_req, sfc_resp))
+    #         except Exception:
+    #             pass
 
-        try:
-            self.bridge = LaserSfcBridge(
-                self.cfg,
-                log=self.append_log,       # thread-safe (đi qua logger)
-                on_result=on_result,
-                sfc_timeout=5.0,
-                idle_sleep=0.01,
-                break_on_reload=False,
-            )
-        except Exception as e:
-            self.append_log(f"[CORE] init failed: {e}", logging.ERROR)
-            self.set_status("ERROR", "Core init failed")
-            return
+    #     try:
+    #         self.bridge = LaserSfcBridge(
+    #             self.cfg,
+    #             log=self.append_log,       # thread-safe (đi qua logger)
+    #             on_result=on_result,
+    #             sfc_timeout=5.0,
+    #             idle_sleep=0.01,
+    #             break_on_reload=False,
+    #         )
+    #     except Exception as e:
+    #         self.append_log(f"[CORE] init failed: {e}", logging.ERROR)
+    #         self.set_status("ERROR", "Core init failed")
+    #         return
 
-        self._core_thread = threading.Thread(target=self.bridge.run_forever, daemon=True)
-        self._core_thread.start()
-        self.append_log("[CORE] started", logging.INFO)
-        self.set_status("LISTENING", "Waiting for LASER trigger...")
+    #     self._core_thread = threading.Thread(target=self.bridge.run_forever, daemon=True)
+    #     self._core_thread.start()
+    #     self.append_log("[CORE] started", logging.INFO)
+    #     self.set_status("LISTENING", "Waiting for LASER trigger...")
 
-    def _poll_core_state(self) -> None:
-        try:
-            # 1) Drain result queue (PASS/FAIL/TIMEOUT/...)
-            while True:
-                try:
-                    ts, status, laser_req, sfc_resp = self._core_q.get_nowait()
-                except Exception:
-                    break
+    # def _poll_core_state(self) -> None:
+    #     try:
+    #         # 1) Drain result queue (PASS/FAIL/TIMEOUT/...)
+    #         while True:
+    #             try:
+    #                 ts, status, laser_req, sfc_resp = self._core_q.get_nowait()
+    #             except Exception:
+    #                 break
 
-                self._last_result_ts = ts
-                self._last_result_status = (status or "").upper()
+    #             self._last_result_ts = ts
+    #             self._last_result_status = (status or "").upper()
 
-                # Flash PASS/FAIL rõ ràng cho công nhân
-                if self._last_result_status in ("PASS", "FAIL"):
-                    desc = f"SFC: {sfc_resp}"
-                    self.set_status(self._last_result_status, desc[:120])
-                elif self._last_result_status in ("TIMEOUT", "SFC_ERROR"):
-                    self.set_status("ERROR", f"{status}: {str(sfc_resp)[:120]}")
-                else:
-                    self.set_status("WARN", f"{status}: {str(sfc_resp)[:120]}")
+    #             # Flash PASS/FAIL rõ ràng cho công nhân
+    #             if self._last_result_status in ("PASS", "FAIL"):
+    #                 desc = f"SFC: {sfc_resp}"
+    #                 self.set_status(self._last_result_status, desc[:120])
+    #             elif self._last_result_status in ("TIMEOUT", "SFC_ERROR"):
+    #                 self.set_status("ERROR", f"{status}: {str(sfc_resp)[:120]}")
+    #             else:
+    #                 self.set_status("WARN", f"{status}: {str(sfc_resp)[:120]}")
 
-            # 2) Nếu không có “result flash” gần đây -> bám theo mode (Listening/Testing/Error)
-            if self.bridge is not None:
-                now = time.monotonic()
-                flash_active = (now - float(self._last_result_ts)) < 1.2 and self._last_result_status in ("PASS", "FAIL")
+    #         # 2) Nếu không có “result flash” gần đây -> bám theo mode (Listening/Testing/Error)
+    #         if self.bridge is not None:
+    #             now = time.monotonic()
+    #             flash_active = (now - float(self._last_result_ts)) < 1.2 and self._last_result_status in ("PASS", "FAIL")
 
-                if not flash_active:
-                    ok, com_laser, txt = self.bridge.get_status_triplet()
-                    mode = (self.bridge.get_mode() or "").upper()
+    #             if not flash_active:
+    #                 ok, com_laser, txt = self.bridge.get_status_triplet()
+    #                 mode = (self.bridge.get_mode() or "").upper()
 
-                    if mode == "LISTENING":
-                        self.set_status("LISTENING", f"LASER={com_laser}")
-                    elif mode == "TESTING":
-                        st, last_req, _ = self.bridge.get_last_result()
-                        self.set_status("TESTING", f"LASER->SFC... ({str(last_req)[:60]})")
-                    elif mode == "ERROR":
-                        self.set_status("ERROR", self.bridge.get_last_error()[:140])
-                    elif mode == "STOPPED":
-                        self.set_status("STOPPED", "Core stopped")
-                    else:
-                        self.set_status("STANDBY", txt[:140])
+    #                 if mode == "LISTENING":
+    #                     self.set_status("LISTENING", f"LASER={com_laser}")
+    #                 elif mode == "TESTING":
+    #                     st, last_req, _ = self.bridge.get_last_result()
+    #                     self.set_status("TESTING", f"LASER->SFC... ({str(last_req)[:60]})")
+    #                 elif mode == "ERROR":
+    #                     self.set_status("ERROR", self.bridge.get_last_error()[:140])
+    #                 elif mode == "STOPPED":
+    #                     self.set_status("STOPPED", "Core stopped")
+    #                 else:
+    #                     self.set_status("STANDBY", txt[:140])
 
-        except Exception as e:
-            # tuyệt đối không để poll làm crash UI
-            try:
-                self.append_log(f"[UI] _poll_core_state error: {e}", logging.ERROR)
-            except Exception:
-                pass
-        finally:
-            self.after(100, self._poll_core_state)
+    #     except Exception as e:
+    #         # tuyệt đối không để poll làm crash UI
+    #         try:
+    #             self.append_log(f"[UI] _poll_core_state error: {e}", logging.ERROR)
+    #         except Exception:
+    #             pass
+    #     finally:
+    #         self.after(100, self._poll_core_state)
 
-    def _on_close(self) -> None:
-        # Không join trực tiếp (sẽ freeze UI). Request stop rồi poll thread.
-        try:
-            self.set_status("STOPPED", "Stopping core...")
-        except Exception:
-            pass
+    # def _on_close(self) -> None:
+    #     # Không join trực tiếp (sẽ freeze UI). Request stop rồi poll thread.
+    #     try:
+    #         self.set_status("STOPPED", "Stopping core...")
+    #     except Exception:
+    #         pass
 
-        try:
-            if self.bridge is not None:
-                self.bridge.request_stop()
-        except Exception:
-            pass
+    #     try:
+    #         if self.bridge is not None:
+    #             self.bridge.request_stop()
+    #     except Exception:
+    #         pass
 
-        self._close_deadline = time.monotonic() + 6.0  # tối đa chờ 6s (read_timeout)
-        self.after(50, self._finalize_close)
+    #     self._close_deadline = time.monotonic() + 6.0  # tối đa chờ 6s (read_timeout)
+    #     self.after(50, self._finalize_close)
 
-    def _finalize_close(self) -> None:
-        try:
-            th = self._core_thread
-            if th and th.is_alive():
-                # quá deadline thì vẫn đóng UI (core thread là daemon)
-                if time.monotonic() < getattr(self, "_close_deadline", 0):
-                    self.after(50, self._finalize_close)
-                    return
-            self.destroy()
-        except Exception:
-            # fallback cực đoan: vẫn thoát
-            try:
-                self.destroy()
-            except Exception:
-                pass
+    # def _finalize_close(self) -> None:
+    #     try:
+    #         th = self._core_thread
+    #         if th and th.is_alive():
+    #             # quá deadline thì vẫn đóng UI (core thread là daemon)
+    #             if time.monotonic() < getattr(self, "_close_deadline", 0):
+    #                 self.after(50, self._finalize_close)
+    #                 return
+    #         self.destroy()
+    #     except Exception:
+    #         # fallback cực đoan: vẫn thoát
+    #         try:
+    #             self.destroy()
+    #         except Exception:
+    #             pass

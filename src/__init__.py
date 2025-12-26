@@ -20,6 +20,10 @@ import re
 
 # ---------- DEFAULT FIELDS (có thể mở rộng sau) ----------
 DEFAULTS: Dict[str, Dict[str, str]] = {
+    "MO": {},
+    "MO_PICKER": {                 # ✅ NEW
+        "LAST_SELECTED_MO": "",
+    },
     "MODEL": {
         "XX-XXX0123": "NEEDPSN04",
         "XX-XXX0124": "NEEDPSN05",
@@ -56,6 +60,16 @@ _SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 # key=value hoặc key: value (bỏ qua comment)
 _KEY_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*[:=]")
 _NEEDPSN_RX = re.compile(r"^NEEDPSN\d+$", re.IGNORECASE)
+_MO_KEY_RX = re.compile(r"^mo\d+$", re.IGNORECASE)
+
+def _is_valid_mo_value(val: str) -> bool:
+    v = (val or "").strip()
+    if not v:
+        return False
+    # không cho whitespace (space/tab/newline)
+    if any(ch.isspace() for ch in v):
+        return False
+    return len(v) <= 21
 
 def sanitize_ini_inplace(
     path: Path,
@@ -188,6 +202,30 @@ def sanitize_ini_inplace(
                 out.append(_ensure_newline(line))
                 continue
             
+            # ✅ SPECIAL: MO section allows dynamic keys mo1/mo2/... and validates VALUE
+            if current_section == "MO":
+                m = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*[:=]\s*(.*?)\s*$", line)
+                if not m:
+                    out.append(_ensure_newline(f"; [SANITIZED][MO_BAD_KV] {s}"))
+                    changed = True
+                    continue
+
+                k = (m.group(1) or "").strip()
+                v = (m.group(2) or "").strip()
+
+                if not _MO_KEY_RX.fullmatch(k):
+                    out.append(_ensure_newline(f"; [SANITIZED][MO_INVALID_KEY] {s}"))
+                    changed = True
+                    continue
+
+                if not _is_valid_mo_value(v):
+                    out.append(_ensure_newline(f"; [SANITIZED][MO_INVALID_VALUE] {s}"))
+                    changed = True
+                    continue
+
+                out.append(_ensure_newline(line))
+                continue
+
             # Validate key belongs to this section
             if key_lower not in allowed_keys.get(current_section, set()):
                 out.append(_ensure_newline(

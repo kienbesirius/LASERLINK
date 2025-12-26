@@ -20,6 +20,10 @@ class ModelPickerConfig:
     CURRENT_SELECTED_MODEL: str
 
 @dataclass(frozen=True)
+class MoPickerConfig:
+    LAST_SELECTED_MO: str
+
+@dataclass(frozen=True)
 class ComConfig:
     COM_LASER: str
     COM_SFC: str
@@ -124,6 +128,8 @@ class ConfigManager:
     SEC_COM = "COM"
     SEC_BAUD = "BAUDRATE"
     SEC_BREAK = "SERIAL_READLINE_BREAK"
+    SEC_MO = "MO" 
+    SEC_MO_PICKER = "MO_PICKER"
     SEC_MODEL = "MODEL"
     SEC_MODEL_PICKER = "MODEL_PICKER"
 
@@ -137,6 +143,11 @@ class ConfigManager:
         self._rules: List[BreakRule] = []
         self._models: dict[str, str] = {}
         self._models_picker: Optional[ModelPickerConfig] = None
+
+        self._mos: dict[int, str] = {}
+        self._mo_picker: Optional[MoPickerConfig] = None
+        self._latest_mo: str = ""
+
         # ensure file exists + patch missing keys
         try:
             ensure_config_ini(self.log)
@@ -241,6 +252,10 @@ class ConfigManager:
 
         # ---- Load Models ----
         self._load_models()
+        self._load_mos()   # ✅ NEW
+        
+        last_sel = cp.get(self.SEC_MO_PICKER, "LAST_SELECTED_MO", fallback="").strip()
+        self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=last_sel)
 
         return True
 
@@ -352,6 +367,139 @@ class ConfigManager:
         # 2025-12-26 09:32:43 | INFO     | LASERLINK | [DEBUG] --- Selected Model ---
         # ModelPickerConfig(CURRENT_SELECTED_MODEL='XX-XXX0123')
         # --- END ---
+
+    def _load_mos(self) -> None:
+        # parse raw section pairs giống _load_models() để giữ đúng thứ tự file
+        try:
+            raw = self.config_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            self._mos = {}
+            self._latest_mo = ""
+            return
+
+        lines = raw.splitlines()
+        in_sec = False
+        pairs: list[tuple[str, str]] = []
+
+        for ln in lines:
+            s = ln.strip()
+            if not s or s.startswith(("#", ";")):
+                continue
+
+            msec = _SEC_RE.match(s)
+            if msec:
+                name = msec.group(1).strip()
+                if name.lower() == self.SEC_MO.lower():
+                    in_sec = True
+                else:
+                    if in_sec:
+                        break
+                    in_sec = False
+                continue
+
+            if not in_sec:
+                continue
+
+            mkv = _KV_RE.match(ln)
+            if not mkv:
+                continue
+            k = mkv.group(1).strip()
+            v = mkv.group(2).strip()
+            pairs.append((k, v))
+
+        import re
+        mos: dict[int, str] = {}
+        for k, v in pairs:
+            m = re.match(r"^mo(\d+)$", (k or "").strip(), flags=re.IGNORECASE)
+            if not m:
+                continue
+            try:
+                idx = int(m.group(1))
+            except Exception:
+                continue
+            val = (v or "").strip()
+            if not val:
+                continue
+            mos[idx] = val
+
+        self._mos = mos
+        self._latest_mo = mos[max(mos.keys())] if mos else ""
+
+    def get_mos(self) -> list[str]:
+        self.reload_if_changed()
+        if not self._mos:
+            return []
+        return [self._mos[i] for i in sorted(self._mos.keys())]
+
+    def get_latest_mo(self) -> str:
+        self.reload_if_changed()
+        return self._latest_mo or ""
+
+    def add_mo(self, mo_value: str, *, persist: bool = True) -> bool:
+        import re
+        v = re.sub(r"\s+", "", (mo_value or "")).strip()
+        if not v:
+            return False
+        if len(v) > 21:
+            v = v[:21]
+
+        self.reload_if_changed()
+
+        # ✅ nếu đã có -> chỉ set selected (KHÔNG thêm mới)
+        existing_lower = {str(val).lower(): str(val) for val in (self._mos or {}).values()}
+        if v.lower() in existing_lower:
+            canon = existing_lower[v.lower()]
+            self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=canon)
+            if persist:
+                return bool(self.update_sections(
+                    {self.SEC_MO_PICKER: {"LAST_SELECTED_MO": canon}},
+                    make_backup=True,
+                    reload_after=True,
+                ))
+            return True
+
+        # ✅ chưa có -> add mới
+        next_idx = (max(self._mos.keys()) + 1) if self._mos else 1
+        key = f"mo{next_idx}"
+
+        self._mos[next_idx] = v
+        self._latest_mo = v
+        self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=v)
+
+        if persist:
+            return bool(self.update_sections(
+                {
+                    self.SEC_MO: {key: v},
+                    self.SEC_MO_PICKER: {"LAST_SELECTED_MO": v},
+                },
+                make_backup=True,
+                reload_after=True,
+            ))
+        return True
+
+
+    def get_last_selected_mo(self) -> str:
+        self.reload_if_changed()
+        return self._mo_picker.LAST_SELECTED_MO if self._mo_picker else ""
+
+    def set_last_selected_mo(self, mo_value: str, *, persist: bool = True) -> bool:
+        import re
+        v = re.sub(r"\s+", "", (mo_value or "")).strip()
+        if not v:
+            return False
+        if len(v) > 21:
+            v = v[:21]
+
+        self.reload_if_changed()
+        self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=v)
+
+        if persist:
+            return bool(self.update_sections(
+                {self.SEC_MO_PICKER: {"LAST_SELECTED_MO": v}},
+                make_backup=True,
+                reload_after=True,
+            ))
+        return True
 
     def update_sections(
         self,
