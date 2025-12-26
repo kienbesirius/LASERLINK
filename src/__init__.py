@@ -18,9 +18,17 @@ while not src.name.endswith("src") and not src.name.startswith("src"):
 sys.path.insert(0, src)
 import re
 
-
 # ---------- DEFAULT FIELDS (có thể mở rộng sau) ----------
 DEFAULTS: Dict[str, Dict[str, str]] = {
+    "MODEL": {
+        "XX-XXX0123": "NEEDPSN04",
+        "XX-XXX0124": "NEEDPSN05",
+        "XX-XXX0125": "NEEDPSN06",
+        "XX-XXX0126": "NEEDPSN07",
+        },
+    "MODEL_PICKER": {
+        "CURRENT_SELECTED_MODEL": "XX-XXX0123",
+    },
     "COM": {
         "COM_LASER": "COM3",
         "COM_SFC": "COM8",
@@ -47,6 +55,7 @@ DEFAULTS: Dict[str, Dict[str, str]] = {
 _SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 # key=value hoặc key: value (bỏ qua comment)
 _KEY_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*[:=]")
+_NEEDPSN_RX = re.compile(r"^NEEDPSN\d+$", re.IGNORECASE)
 
 def sanitize_ini_inplace(
     path: Path,
@@ -161,7 +170,24 @@ def sanitize_ini_inplace(
                 out.append(_ensure_newline(f"; [SANITIZED][KEY_OUTSIDE_SECTION] {s}"))
                 changed = True
                 continue
+            
+            # ✅ SPECIAL: MODEL section allows dynamic keys, only validate VALUE
+            if current_section == "MODEL":
+                # parse value (very light, supports key=value or key: value)
+                m = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*[:=]\s*(.*?)\s*$", line)
+                if not m:
+                    out.append(_ensure_newline(f"; [SANITIZED][MODEL_BAD_KV] {s}"))
+                    changed = True
+                    continue
+                val = (m.group(2) or "").strip()
+                if not _NEEDPSN_RX.fullmatch(val):
+                    out.append(_ensure_newline(f"; [SANITIZED][MODEL_INVALID_VALUE] {s}"))
+                    changed = True
+                    continue
 
+                out.append(_ensure_newline(line))
+                continue
+            
             # Validate key belongs to this section
             if key_lower not in allowed_keys.get(current_section, set()):
                 out.append(_ensure_newline(

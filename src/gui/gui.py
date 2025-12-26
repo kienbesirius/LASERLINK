@@ -10,7 +10,9 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Type, Any
+
+from typer import style
 
 # -----------------------------------------------------------------------------
 # Path bootstrap: make sure we can import `src.*` when running this file directly.
@@ -281,7 +283,7 @@ class BaseDialog(ttk.Frame):
         header.columnconfigure(0, weight=1)
 
         ttk.Label(header, text=title, style="DialogTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(header, text="✕", command=self.host.close_top, width=3).grid(row=0, column=1, sticky="e")
+        ttk.Button(header, text="✕", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=3).grid(row=0, column=1, sticky="e")
         ttk.Separator(header, style="Thin.TSeparator").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         self.body = ttk.Frame(self, style="InCard.TFrame")
@@ -304,7 +306,7 @@ class InfoDialog(BaseDialog):
         txt.configure(state="disabled")
         txt.pack(fill="both", expand=True)
 
-        ttk.Button(self.footer, text="OK", command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
+        ttk.Button(self.footer, text="OK", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
 
 
 class ErrorDialog(BaseDialog):
@@ -315,23 +317,229 @@ class ErrorDialog(BaseDialog):
         lbl = ttk.Label(self.body, text=message, style="Error.TLabel", wraplength=600, justify="left")
         lbl.pack(fill="x", expand=False)
 
-        ttk.Button(self.footer, text="Đóng", command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
+        ttk.Button(self.footer, text="Đóng", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=10).grid(row=0, column=0, sticky="e")
 
-class EditKeyDialog(BaseDialog):
-    """Prompt user for a key before allowing config edits."""
+class ModelEditDialog(ttk.Frame):
     dismiss_on_backdrop = False
 
-    def __init__(self, host: DialogHost, app: "LASERLINKAPP", *, on_success):
-        super().__init__(host, "ENTER KEY", width=520)
+    def __init__(self, host: DialogHost, app: "LASERLINKAPP"):
+        super().__init__(host, style="TFrame")
+        self.host = host
+        self.app = app
+
+        # full overlay background (host already dims, this is editor layer)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        # Center card
+        self.card = ttk.Frame(self, style="Card.TFrame", padding=16)
+        self.card.place(relx=0.5, rely=0.5, anchor="center", width=920, height=560)
+        self.card.columnconfigure(0, weight=0)
+        self.card.columnconfigure(1, weight=1)
+        self.card.rowconfigure(1, weight=1)
+
+        # Header
+        hdr = ttk.Frame(self.card, style="InCard.TFrame")
+        hdr.grid(row=0, column=0, columnspan=2, sticky="ew")
+        hdr.columnconfigure(0, weight=1)
+        ttk.Label(hdr, text="MODEL EDITOR", style="DialogTitle.TLabel")\
+            .grid(row=0, column=0, sticky="w")
+        ttk.Button(hdr, text="✕", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=3)\
+            .grid(row=0, column=1, sticky="e")
+        ttk.Separator(hdr, style="Thin.TSeparator")\
+            .grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+        # Left list
+        left = ttk.Frame(self.card, style="InCard.TFrame")
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(12, 0))
+        left.rowconfigure(1, weight=1)
+
+        ttk.Label(left, text="Models", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+
+        self.lb = tk.Listbox(left, height=16)
+        self.lb.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.lb.yview)
+        sb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        self.lb.configure(yscrollcommand=sb.set)
+
+        self.lb.bind("<<ListboxSelect>>", lambda _e: self._load_selected_from_list())
+
+        btn_left = ttk.Frame(left, style="InCard.TFrame")
+        btn_left.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(btn_left, text="New", style="Flat.TButton", takefocus=False, command=self._new).pack(side="left")
+        ttk.Button(btn_left, text="Use Selected", style="Flat.TButton", takefocus=False, command=self._use_selected_as_current).pack(side="left", padx=(8, 0))
+
+        # Right form
+        right = ttk.Frame(self.card, style="InCard.TFrame")
+        right.grid(row=1, column=1, sticky="nsew", pady=(12, 0))
+        right.columnconfigure(1, weight=1)
+
+        ttk.Label(right, text="Edit / Add", style="Muted.TLabel")\
+            .grid(row=0, column=0, columnspan=2, sticky="w")
+
+        self.v_model_id = tk.StringVar(value="")
+        self.v_needpsn  = tk.StringVar(value="")
+
+        ttk.Label(right, text="MODEL ID", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.ent_model = ttk.Entry(right, textvariable=self.v_model_id)
+        self.ent_model.grid(row=1, column=1, sticky="ew", pady=(10, 0))
+
+        ttk.Label(right, text="NEEDPSN", style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.ent_needpsn = ttk.Entry(right, textvariable=self.v_needpsn)
+        self.ent_needpsn.grid(row=2, column=1, sticky="ew", pady=(10, 0))
+
+        ttk.Label(
+            right,
+            text="Rule: NEEDPSN phải match regex: NEEDPSN\\d+ (vd: NEEDPSN04)",
+            style="Muted.TLabel",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        self.lbl_err = ttk.Label(right, text="", style="Error.TLabel", wraplength=520, justify="left")
+        self.lbl_err.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        # Footer
+        ftr = ttk.Frame(self.card, style="InCard.TFrame")
+        ftr.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        ftr.columnconfigure(0, weight=1)
+
+        btns = ttk.Frame(ftr, style="InCard.TFrame")
+        btns.grid(row=0, column=0, sticky="e")
+
+        ttk.Button(btns, text="Cancel", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=10)\
+            .pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="Save", style="Flat.TButton", takefocus=False, command=self._save, width=10)\
+            .pack(side="right")
+
+        # init list + prefill current
+        self._reload_list()
+        cur = ""
+        if self.app.cfg is not None:
+            cur = (self.app.cfg.get_current_selected_model() or "").strip()
+        if cur:
+            self._select_in_list(cur)
+            self._load_model(cur)
+
+    def _reload_list(self) -> None:
+        self.lb.delete(0, "end")
+        if self.app.cfg is None:
+            return
+        for m in (self.app.cfg.get_models() or []):
+            self.lb.insert("end", m)
+
+    def _select_in_list(self, model: str) -> None:
+        target = (model or "").strip().lower()
+        if not target:
+            return
+        for i in range(self.lb.size()):
+            if str(self.lb.get(i)).lower() == target:
+                self.lb.selection_clear(0, "end")
+                self.lb.selection_set(i)
+                self.lb.see(i)
+                return
+
+    def _load_selected_from_list(self) -> None:
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        model = str(self.lb.get(sel[0]))
+        self._load_model(model)
+
+    def _load_model(self, model: str) -> None:
+        self.lbl_err.configure(text="")
+        self.v_model_id.set(model)
+        needpsn = ""
+        if self.app.cfg is not None and hasattr(self.app.cfg, "get_model_needpsn"):
+            needpsn = self.app.cfg.get_model_needpsn(model) or ""
+        self.v_needpsn.set(needpsn)
+
+    def _new(self) -> None:
+        self.lbl_err.configure(text="")
+        self.v_model_id.set("")
+        self.v_needpsn.set("")
+        self.ent_model.focus_set()
+
+    def _use_selected_as_current(self) -> None:
+        if self.app.cfg is None:
+            return
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        model = str(self.lb.get(sel[0]))
+        ok = bool(self.app.cfg.set_current_selected_model(model, persist=True))
+        if ok:
+            self.app._refresh_model_picker(select=model)
+            self.host.close_top()
+        else:
+            self.lbl_err.configure(text=f"Cannot set current model: {model}")
+
+    def _save(self) -> None:
+        self.lbl_err.configure(text="")
+        if self.app.cfg is None:
+            self.lbl_err.configure(text="CFG not available.")
+            return
+
+        model_id = (self.v_model_id.get() or "").strip()
+        needpsn  = (self.v_needpsn.get() or "").strip()
+
+        import re
+        if not model_id:
+            self.lbl_err.configure(text="MODEL ID không được trống.")
+            return
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", model_id):
+            self.lbl_err.configure(text="MODEL ID chỉ nên gồm: A-Z a-z 0-9 _ . -")
+            return
+        if not re.fullmatch(r"NEEDPSN\d+", needpsn, flags=re.IGNORECASE):
+            self.lbl_err.configure(text="NEEDPSN không hợp lệ. Ví dụ đúng: NEEDPSN04")
+            return
+
+        # persist via ConfigManager
+        if not hasattr(self.app.cfg, "upsert_model_needpsn"):
+            self.lbl_err.configure(text="Missing CFG.upsert_model_needpsn().")
+            return
+
+        ok = bool(self.app.cfg.upsert_model_needpsn(model_id, needpsn, persist=True))
+        if not ok:
+            self.lbl_err.configure(text="Save failed (upsert_model_needpsn returned False).")
+            return
+
+        # set current selected model after save
+        ok2 = bool(self.app.cfg.set_current_selected_model(model_id, persist=True))
+        if not ok2:
+            self.lbl_err.configure(text="Saved mapping, but failed to set CURRENT_SELECTED_MODEL.")
+            return
+
+        # refresh main UI picker + close
+        self.app._refresh_model_picker(select=model_id)
+        self.app.append_log(f"[OK] MODEL upsert -> {model_id}={needpsn} (and selected)")
+        self.host.close_top()
+
+class EditKeyDialog(BaseDialog):
+    """Prompt user for a key before allowing protected edits."""
+    dismiss_on_backdrop = False
+
+    def __init__(
+        self,
+        host: DialogHost,
+        app: "LASERLINKAPP",
+        *,
+        on_success,
+        title: str = "ENTER KEY",
+        context_text: str = "Nhập mã key để mở chức năng chỉnh sửa.",
+        error_text: str = "Sai key. Vui lòng thử lại hoặc liên hệ TE/Engineer. 5935 - 70626",
+        width: int = 520,
+    ):
+        super().__init__(host, title, width=width)
         self.app = app
         self._on_success = on_success
+        self._error_text = error_text
 
         wrap = ttk.Frame(self.body, style="InCard.TFrame")
         wrap.pack(fill="x", expand=False)
 
         ttk.Label(
             wrap,
-            text="Nhập mã key để mở chức năng sửa config.ini",
+            text=context_text,
             style="Muted.TLabel",
             wraplength=480,
             justify="left",
@@ -346,8 +554,8 @@ class EditKeyDialog(BaseDialog):
 
         right = ttk.Frame(self.footer, style="InCard.TFrame")
         right.grid(row=0, column=0, sticky="e")
-        ttk.Button(right, text="Cancel", command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
-        ttk.Button(right, text="OK", command=self._ok, width=10).pack(side="right")
+        ttk.Button(right, text="Cancel", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
+        ttk.Button(right, text="OK", style="Flat.TButton", takefocus=False, command=self._ok, width=10).pack(side="right")
 
         self.ent.bind("<Return>", lambda _e: self._ok())
         self.ent.focus_set()
@@ -361,9 +569,8 @@ class EditKeyDialog(BaseDialog):
             return
 
         self.v_key.set("")
-        self.lbl_err.configure(text="Sai key. Vui lòng thử lại hoặc liên hệ TE/Engineer. 5935 - 70626")
+        self.lbl_err.configure(text=self._error_text)
         self.ent.focus_set()
-
 
 class EditConfigDialog(BaseDialog):
     # Avoid accidental close while editing; use explicit Cancel/Save.
@@ -445,12 +652,12 @@ class EditConfigDialog(BaseDialog):
         # Footer buttons
         left = ttk.Frame(self.footer, style="InCard.TFrame")
         left.grid(row=0, column=0, sticky="w")
-        ttk.Button(left, text="Scan Ports", command=self._scan_ports).pack(side="left")
+        ttk.Button(left, text="Scan Ports", style="Flat.TButton", takefocus=False, command=self._scan_ports).pack(side="left")
 
         right = ttk.Frame(self.footer, style="InCard.TFrame")
         right.grid(row=0, column=0, sticky="e")
-        ttk.Button(right, text="Cancel", command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
-        ttk.Button(right, text="Save", command=self._save, width=10).pack(side="right")
+        ttk.Button(right, text="Cancel", style="Flat.TButton", takefocus=False, command=self.host.close_top, width=10).pack(side="right", padx=(8, 0))
+        ttk.Button(right, text="Save", style="Flat.TButton", takefocus=False, command=self._save, width=10).pack(side="right")
 
     def _scan_ports(self):
         info = "pyserial chưa có nên không scan được." if not _HAS_SERIAL else "\n".join(list_ports()) or "(No ports found)"
@@ -514,7 +721,7 @@ class LASERLINKAPP(tk.Tk):
             pass
 
         style.configure("TFrame", background=BG)
-        style.configure("Card.TFrame", background=CARD_BG, borderwidth=1, relief="solid")
+        style.configure("Card.TFrame", background=CARD_BG, borderwidth=0, relief="flat")
         style.configure("InCard.TFrame", background=CARD_BG, borderwidth=0, relief="flat")
         style.configure("Thin.TSeparator", background=BORDER)
         style.configure("TLabel", background=CARD_BG, foreground=TEXT)
@@ -523,10 +730,19 @@ class LASERLINKAPP(tk.Tk):
         style.configure("Error.TLabel", background=CARD_BG, foreground=ERR_FG)
 
         # ---- Status styles (for background coloring) ----
-        style.configure("StatusCard.TFrame", background=CARD_BG, borderwidth=1, relief="solid")
+        style.configure("StatusCard.TFrame", background=CARD_BG, borderwidth=0, relief="flat")
         style.configure("StatusTitle.TLabel", background=CARD_BG, foreground=MUTED)
         style.configure("StatusBig.TLabel",   background=CARD_BG, foreground=TEXT)
         style.configure("StatusDesc.TLabel",  background=CARD_BG, foreground=MUTED)
+
+        # ---- Style flat button
+        style.configure("Flat.TButton", relief="flat", borderwidth=0, focusthickness=0, padding=(12, 8))
+        style.map("Flat.TButton", focuscolor=[("focus", "")])
+        style.map("Flat.TButton",
+            relief=[("pressed", "flat"), ("active", "flat")],
+            borderwidth=[("active", 0), ("pressed", 0)],
+            padding=[("pressed", (12, 8)), ("active", (12, 8))],
+        )
 
         self._style = style  # giữ lại để update runtime
 
@@ -539,7 +755,7 @@ class LASERLINKAPP(tk.Tk):
 
             # xanh (blue) cho “đang chạy/đang test”
             "LISTENING":  ("#0EA5E9", "#FFFFFF", "#E5E7EB"),
-            "TESTING":    ("#2563EB", "#FFFFFF", "#E5E7EB"),
+            "TESTING":    ("#124BC7", "#FFFFFF", "#E5E7EB"),
             "STANDBY":    ("#0EA5E9", "#FFFFFF", "#E5E7EB"),
 
             # lục (green) cho OK/PASS
@@ -560,7 +776,10 @@ class LASERLINKAPP(tk.Tk):
         self.container.place(x=0, y=0, relwidth=1, relheight=1)
 
         self.container.columnconfigure(0, weight=1)
-        self.container.rowconfigure(1, weight=1)
+        self.container.rowconfigure(0, weight=0)  # status
+        self.container.rowconfigure(1, weight=0)  # ✅ model row
+        self.container.rowconfigure(2, weight=1)  # content grows
+        self.container.rowconfigure(3, weight=0)  # footer
 
         # Header: Status card
         self.status_card = ttk.Frame(self.container, style="StatusCard.TFrame", padding=16)
@@ -576,9 +795,32 @@ class LASERLINKAPP(tk.Tk):
         self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
+        # Model row 
+        # ✅ new model row
+        self.model_card = ttk.Frame(self.container, style="Card.TFrame", padding=14)
+        self.model_card.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        self.model_card.columnconfigure(1, weight=1)
+
+        ttk.Label(self.model_card, text="MODEL", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+
+        self._v_model = tk.StringVar(value="")
+        self.cb_model = ttk.Combobox(self.model_card, textvariable=self._v_model, state="readonly", width=28)
+        self.cb_model.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.cb_model.bind("<<ComboboxSelected>>", lambda _e: self._on_model_selected())
+
+        self._v_needpsn = tk.StringVar(value="")
+        ttk.Label(self.model_card, textvariable=self._v_needpsn, style="Muted.TLabel")\
+            .grid(row=0, column=2, sticky="w", padx=(12, 0))
+
+        btns = ttk.Frame(self.model_card, style="InCard.TFrame")
+        btns.grid(row=0, column=3, sticky="e")
+        ttk.Button(btns, text="Edit Models", style="Flat.TButton", takefocus=False, command=lambda: self.open_edit("models")).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Refresh", style="Flat.TButton", takefocus=False, command=self._refresh_model_picker).pack(side="left")
+
+
         # Content row: left config + right log
         self.content = ttk.Frame(self.container, style="TFrame")
-        self.content.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        self.content.grid(row=2, column=0, sticky="nsew", pady=(14, 0))
         self.content.columnconfigure(0, weight=0)
         self.content.columnconfigure(1, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -597,7 +839,7 @@ class LASERLINKAPP(tk.Tk):
 
         # Footer row
         self.footer = ttk.Frame(self.container, style="TFrame")
-        self.footer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.footer.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         self.footer.columnconfigure(0, weight=1)
 
         # Dialog host (overlay in parent)
@@ -668,13 +910,13 @@ class LASERLINKAPP(tk.Tk):
         btns = ttk.Frame(self.left, style="InCard.TFrame")
         btns.pack(fill="x")
 
-        ttk.Button(btns, text="Reload", command=self.reload_config).pack(fill="x")
-        ttk.Button(btns, text="Edit config.ini", command=self.open_edit_config).pack(fill="x", pady=(8, 0))
-        ttk.Button(btns, text="Info", command=self.open_info).pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="Reload", style="Flat.TButton", takefocus=False, command=self.reload_config).pack(fill="x")
+        ttk.Button(btns, text="Edit config.ini", style="Flat.TButton", takefocus=False, command=lambda: self.open_edit("config")).pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="Info", style="Flat.TButton", takefocus=False, command=self.open_info).pack(fill="x", pady=(8, 0))
 
         ttk.Separator(self.left, style="Thin.TSeparator").pack(fill="x", pady=14)
 
-        self.btn_mock = ttk.Button(self.left, text="Start Mock UX (disabled)", command=self._toggle_mock)
+        self.btn_mock = ttk.Button(self.left, text="Start Mock UX (disabled)", style="Flat.TButton", takefocus=False, command=self._toggle_mock)
         self.btn_mock.pack(fill="x")
         self.btn_mock.configure(state="disabled")  # disable mock UX for now
 
@@ -756,7 +998,7 @@ class LASERLINKAPP(tk.Tk):
         tick()
 
     def _stop_mock_ui(self) -> None:
-        return None
+        # return None
         self._mock_running = False
         self.btn_mock.configure(text="Start Mock UX")
         if self._mock_after_id:
@@ -767,7 +1009,7 @@ class LASERLINKAPP(tk.Tk):
             self._mock_after_id = None
 
     def _toggle_mock(self) -> None:
-        return None
+        # return None
         if self._mock_running:
             self._stop_mock_ui()
             self.set_status("IDLE", "Mock stopped.")
@@ -779,12 +1021,66 @@ class LASERLINKAPP(tk.Tk):
     # UI helpers
     # -----------------------------
 
+    def _refresh_model_picker(self, *, select: str | None = None) -> None:
+        if self.cfg is None:
+            self.cb_model.configure(values=[])
+            self._v_needpsn.set("")
+            return
+
+        self.cfg.reload_if_changed()
+
+        models = list(self.cfg.get_models() or [])
+        cur = (select or self.cfg.get_current_selected_model() or "").strip()
+
+        self.cb_model.configure(values=models)
+
+        # normalize selection if possible
+        if cur and models:
+            lower_map = {m.lower(): m for m in models}
+            cur = lower_map.get(cur.lower(), models[0])
+        elif models:
+            cur = models[0]
+        else:
+            cur = ""
+
+        self._v_model.set(cur)
+
+        # NEEDPSN display
+        needpsn = ""
+        if cur and hasattr(self.cfg, "get_model_needpsn"):
+            needpsn = self.cfg.get_model_needpsn(cur)
+        self._v_needpsn.set(needpsn or "")
+
+    def _on_model_selected(self) -> None:
+        if self.cfg is None:
+            return
+        model = (self._v_model.get() or "").strip()
+        if not model:
+            return
+
+        ok = bool(self.cfg.set_current_selected_model(model, persist=True))
+        if ok:
+            # update NEEDPSN label
+            self._refresh_model_picker(select=model)
+            self.append_log(f"[OK] MODEL selected -> {model}")
+        else:
+            self.dialog_host.show(ErrorDialog(self.dialog_host, "MODEL SET FAILED", f"Cannot set model: {model}"))
+
+
     def _refresh_config_summary(self) -> None:
         snap = self.get_config_snapshot()
 
         self._v_cfg_laser.set(f"LASER: {snap.get('COM_LASER','')}:{snap.get('BAUDRATE_LASER','')}")
         self._v_cfg_sfc.set(  f"SFC:   {snap.get('COM_SFC','')}:{snap.get('BAUDRATE_SFC','')}")
         self._v_cfg_scan.set( f"SCAN:  {snap.get('COM_SCAN','')}:{snap.get('BAUDRATE_SCAN','')}")
+
+    def _tick_model_picker(self) -> None:
+        try:
+            self._refresh_model_picker()
+        except Exception:
+            pass
+        finally:
+            self.after(800, self._tick_model_picker)
 
     def _tick_config_summary(self) -> None:
         try:
@@ -796,7 +1092,6 @@ class LASERLINKAPP(tk.Tk):
             pass
         finally:
             self.after(800, self._tick_config_summary)
-
 
     def _pump_log_buffer(self):
         try:
@@ -909,15 +1204,55 @@ class LASERLINKAPP(tk.Tk):
             info.append(f"  {k} = {snap[k]}")
         self.dialog_host.show(InfoDialog(self.dialog_host, "\n".join(info)))
 
-    def open_edit_config(self):
+
+    def open_protected_editor(
+        self,
+        dialog_cls: Type,
+        *dialog_args: Any,
+        title: str = "ENTER KEY",
+        context_text: str = "Nhập mã key để mở chức năng chỉnh sửa.",
+        error_text: str = "Sai key. Vui lòng thử lại hoặc liên hệ TE/Engineer. 5935 - 70626",
+        **dialog_kwargs: Any,
+    ) -> None:
+        def _show_target():
+            self.dialog_host.show(dialog_cls(self.dialog_host, self, *dialog_args, **dialog_kwargs))
+
         if self._is_edit_unlocked():
-            self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
+            _show_target()
             return
 
-        def _go_edit():
-            self.dialog_host.show(EditConfigDialog(self.dialog_host, self))
+        self.dialog_host.show(EditKeyDialog(
+            self.dialog_host,
+            self,
+            on_success=_show_target,
+            title=title,
+            context_text=context_text,
+            error_text=error_text,
+        ))
 
-        self.dialog_host.show(EditKeyDialog(self.dialog_host, self, on_success=_go_edit))
+    def open_edit(self, target: str) -> None:
+        target = (target or "").strip().lower()
+
+        if target == "config":
+            self.open_protected_editor(
+                EditConfigDialog,
+                title="ENTER KEY",
+                context_text="Nhập mã key để mở chức năng sửa config.ini.\n"
+                            "Lưu ý: thay đổi sai có thể khiến app không nhận COM/BAUDRATE.",
+            )
+            return
+
+        if target == "models":
+            self.open_protected_editor(
+                ModelEditDialog,
+                title="ENTER KEY",
+                context_text="Nhập mã key để mở chức năng sửa MODEL.\n"
+                            "Bạn có thể thêm/sửa mapping MODEL → NEEDPSNxx.",
+            )
+            return
+
+        # fallback
+        self.dialog_host.show(InfoDialog(self.dialog_host, "INFO", f"Unknown edit target: {target!r}"))
 
     def get_config_snapshot(self) -> dict[str, str]:
         """
@@ -956,6 +1291,7 @@ class LASERLINKAPP(tk.Tk):
         try:
             self.cfg.reload(force=True)
             self._refresh_config_summary()
+            self.after(800, self._tick_model_picker)
             self.logger.info("[OK] Reloaded config.ini via CFG")
             self.set_status("OK", "Config loaded")
         except Exception as e:

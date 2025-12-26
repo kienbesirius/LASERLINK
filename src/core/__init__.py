@@ -14,6 +14,11 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 # =========================
 # 3) Data structures
 # =========================
+
+@dataclass(frozen=True)
+class ModelPickerConfig:
+    CURRENT_SELECTED_MODEL: str
+
 @dataclass(frozen=True)
 class ComConfig:
     COM_LASER: str
@@ -36,6 +41,10 @@ class BreakRule:
 # 4) Helpers
 # =========================
 _LIST_SPLIT_RE = re.compile(r"[,\n]+")
+_SEC_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+_KV_RE  = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*[:=]\s*(.*?)\s*$")
+_NEEDPSN_RX = re.compile(r"^NEEDPSN\d+$", re.IGNORECASE)
+_MODEL_KEY_RX = re.compile(r"^[A-Za-z0-9_.-]+$")  # hợp với ini key pattern bạn đang dùng
 
 def _split_list(s: str) -> List[str]:
     parts = _LIST_SPLIT_RE.split(s or "")
@@ -115,6 +124,8 @@ class ConfigManager:
     SEC_COM = "COM"
     SEC_BAUD = "BAUDRATE"
     SEC_BREAK = "SERIAL_READLINE_BREAK"
+    SEC_MODEL = "MODEL"
+    SEC_MODEL_PICKER = "MODEL_PICKER"
 
     def __init__(self, config_path: Path, log: Callable[[str], None] = print):
         self.config_path = Path(config_path)
@@ -124,7 +135,8 @@ class ConfigManager:
         self._com: Optional[ComConfig] = None
         self._baud: Optional[BaudrateConfig] = None
         self._rules: List[BreakRule] = []
-
+        self._models: dict[str, str] = {}
+        self._models_picker: Optional[ModelPickerConfig] = None
         # ensure file exists + patch missing keys
         try:
             ensure_config_ini(self.log)
@@ -226,7 +238,120 @@ class ConfigManager:
         except Exception:
             self._mtime_ns = -1
 
+
+        # ---- Load Models ----
+        self._load_models()
+
         return True
+
+    def _load_models(self):
+        def _parse_section_pairs(sec_name: str) -> list[tuple[str, str]]:
+            try:
+                raw = self.config_path.read_text(encoding="utf-8", errors="replace")
+                # self.log(f"[DEBUG] Reading models from config.ini\n {raw}\n --- END ---\n")
+                # te@bekomachj:~/Documents/LaserLink$ /bin/python3 /home/te/Documents/LaserLink/run.py
+                # [DEBUG] Reading models from config.ini
+                #  [COM]
+                # COM_LASER=COM32
+                # COM_SFC=/dev/ttyS11
+                # COM_SCAN=/dev/ttyS11
+
+                # [BAUDRATE]
+                # BAUDRATE_LASER=96002
+                # BAUDRATE_SFC=9600
+                # BAUDRATE_SCAN=9600
+
+                # [SERIAL_READLINE_BREAK]
+                # TOKENS=UNDO, END:END, MATCHREGEX:NEEDPSN\d+\s*$, MATCHREGEX:FAIL\d+PASS\s*$, MATCHREGEX:FAIL\d+\s*$, MATCHREGEX:PASSED=[01]PASS\s*$, MATCHREGEX:PASSED=[01]\s*$
+                # ALWAYS_LAST=END:PASSED=1, END:PASSED=0, IN:NEEDPSN, END:PASS, END:FAIL, END:ERRO
+
+                # [MODEL]
+                # XX-XXX0123=NEEDPSN04
+                # XX-XXX0124=NEEDPSN05
+                # XX-XXX0125=NEEDPSN06
+                # XX-XXX0126=NEEDPSN07
+
+                # [MODEL_PICKER]
+                # CURRENT_SELECTED_MODEL=XX-XXX0123
+
+                #  --- END ---
+            except Exception:
+                return []
+            lines = raw.splitlines()
+
+            pairs: list[tuple[str, str]] = []
+            in_sec = False
+            for ln in lines:
+                s = ln.strip()
+                if not s or s.startswith(("#", ";")):
+                    continue
+
+                msec = _SEC_RE.match(s)
+                if msec:
+                    name = msec.group(1).strip()
+                    if name.lower() == sec_name.lower():
+                        in_sec = True
+                    else:
+                        if in_sec:
+                            break
+                        in_sec = False
+                    continue
+
+                if not in_sec:
+                    continue
+
+                mkv = _KV_RE.match(ln)
+                if not mkv:
+                    continue
+                k = mkv.group(1).strip()
+                v = mkv.group(2).strip()
+                pairs.append((k, v))
+            return pairs
+
+        # 1) models list (preserve original case + order)
+        model_pairs = _parse_section_pairs(self.SEC_MODEL)
+        models_ordered: dict[str, str] = {}
+        canon_by_lower: dict[str, str] = {}
+
+        for k, v in model_pairs:
+            lk = k.lower()
+            if lk in canon_by_lower:
+                continue
+            canon_by_lower[lk] = k
+            models_ordered[k] = v
+
+        self._models = models_ordered
+
+        # 2) current selected model
+        picker_pairs = _parse_section_pairs(self.SEC_MODEL_PICKER)
+        cur = ""
+        for k, v in picker_pairs:
+            if k.strip().lower() == "current_selected_model":
+                cur = v.strip()
+                break
+
+        if not cur:
+            cur = next(iter(self._models.keys()), "")
+
+        # normalize to canonical casing if possible
+        if cur and self._models:
+            c = canon_by_lower.get(cur.lower())
+            if c:
+                cur = c
+            else:
+                # không khớp list -> fallback
+                self.log(f"[WARN] CURRENT_SELECTED_MODEL {cur!r} not in [MODEL] -> fallback to first model")
+                cur = next(iter(self._models.keys()), "")
+        # self.log(f"[DEBUG] --- Loaded Models ---\n {self._models}\n --- END --- \n")
+        self._model_picker = ModelPickerConfig(CURRENT_SELECTED_MODEL=cur)
+        # self.log(f"[DEBUG] --- Selected Model ---\n {self._model_picker}\n --- END --- \n")
+
+        # 2025-12-26 09:32:43 | INFO     | LASERLINK | [DEBUG] --- Loaded Models ---
+        # {'XX-XXX0123': 'NEEDPSN04', 'XX-XXX0124': 'NEEDPSN05', 'XX-XXX0125': 'NEEDPSN06', 'XX-XXX0126': 'NEEDPSN07'}
+        # --- END --- 
+        # 2025-12-26 09:32:43 | INFO     | LASERLINK | [DEBUG] --- Selected Model ---
+        # ModelPickerConfig(CURRENT_SELECTED_MODEL='XX-XXX0123')
+        # --- END ---
 
     def update_sections(
         self,
@@ -352,7 +477,94 @@ class ConfigManager:
 
         return True
 
+    def get_model_needpsn(self, model_id: str) -> str:
+        self.reload_if_changed()
+        m = (model_id or "").strip()
+        if not m:
+            return ""
+        # case-insensitive lookup
+        for k, v in (self._models or {}).items():
+            if k.lower() == m.lower():
+                return str(v)
+        return ""
 
+    def upsert_model_needpsn(self, model_id: str, needpsn: str, *, persist: bool = True) -> bool:
+        mid = (model_id or "").strip()
+        np  = (needpsn or "").strip()
+
+        if not mid or not _MODEL_KEY_RX.fullmatch(mid):
+            return False
+        if not _NEEDPSN_RX.fullmatch(np):
+            return False
+
+        self.reload_if_changed()
+
+        # canonicalize key casing if model already exists
+        lower_map = {k.lower(): k for k in self._models.keys()}
+        canon_mid = lower_map.get(mid.lower(), mid)
+
+        canon_np = np.upper()
+
+        # update cache
+        self._models[canon_mid] = canon_np
+
+        if persist:
+            ok = bool(self.update_sections(
+                {self.SEC_MODEL: {canon_mid: canon_np}},
+                make_backup=True,
+                reload_after=True,
+            ))
+            if not ok:
+                return False
+
+        return True
+    # ----------------------------
+    # -------- Model API ---------
+    #-----------------------------
+
+    def get_models(self) -> list[str]:
+        self.reload_if_changed()
+        return list(self._models.keys())
+    
+    def get_current_selected_model(self) -> str:
+        self.reload_if_changed()
+        return self._model_picker.CURRENT_SELECTED_MODEL if self._model_picker else ""
+    
+    def set_current_selected_model(self, model: str, *, persist: bool = True) -> bool:
+        model = (model or "").strip()
+        if not model:
+            return False
+        self.reload_if_changed()
+
+        canon = None
+        if self._models:
+            lower_map = {k.lower(): k for k in self._models.keys()}
+            canon = lower_map.get(model.lower())
+            if canon is None:
+                return False
+            model = canon
+
+        self._model_picker = ModelPickerConfig(CURRENT_SELECTED_MODEL=model)
+
+        if persist: 
+            try:
+                self.update_sections(
+                    {self.SEC_MODEL_PICKER: {"CURRENT_SELECTED_MODEL": model}},
+                    make_backup=True,
+                    reload_after=True,
+                )
+            except Exception as e:
+                return False
+            
+        return True
+    
+    @property
+    def current_selected_model(self)->str:
+        return self.get_current_selected_model()
+    
+    #--------------------------------
+    # -------- End ConfigManager ----
+    # -------------------------------
 def load_readline_break_rules(cfg_path: str, *, log=print) -> List[BreakRule]:
     import configparser
 
