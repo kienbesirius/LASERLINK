@@ -13,8 +13,6 @@ from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
 from typing import Optional, Type, Any
 
-from typer import style
-
 # -----------------------------------------------------------------------------
 # Path bootstrap: make sure we can import `src.*` when running this file directly.
 # This file is expected at: <project_root>/src/gui/gui.py
