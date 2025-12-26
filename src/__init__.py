@@ -25,13 +25,10 @@ DEFAULTS: Dict[str, Dict[str, str]] = {
         "LAST_SELECTED_MO": "",
     },
     "MODEL": {
-        "XX-XXX0123": "NEEDPSN04",
-        "XX-XXX0124": "NEEDPSN05",
-        "XX-XXX0125": "NEEDPSN06",
-        "XX-XXX0126": "NEEDPSN07",
+        "31-010815": "NEEDPSN06",
         },
     "MODEL_PICKER": {
-        "CURRENT_SELECTED_MODEL": "XX-XXX0123",
+        "CURRENT_SELECTED_MODEL": "31-010815",
     },
     "COM": {
         "COM_LASER": "COM3",

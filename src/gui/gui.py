@@ -102,13 +102,6 @@ except Exception:
         logger.setLevel(level)
         return logger, []
     
-try:
-    from src.core.core import LaserSfcBridge  # type: ignore
-except Exception as e:
-    import traceback
-    traceback.print_exc()   # <<< in ra đúng file + dòng lỗi
-    LaserSfcBridge = None  # type: ignore
-
 # -----------------------------
 # Theme constants (Light, "uy tín")
 # -----------------------------
@@ -124,6 +117,7 @@ WARN_FG = "#7A4B00"
 EDIT_KEY_ENV = "LASERLINK_EDIT_KEY"
 DEFAULT_EDIT_KEY = "Laserlinkfii168!!"          # đổi tuỳ bạn
 EDIT_UNLOCK_TTL_SEC = 3       # unlock tạm 3 giây sau khi nhập đúng
+SHOW_SCAN_UI = False
 
 # -----------------------------
 # Config (source of truth = src.core.CFG)
@@ -616,7 +610,7 @@ class EditConfigDialog(BaseDialog):
         def row(r: int, label: str, var: tk.StringVar, choices: Optional[list[str]] = None):
             ttk.Label(grid, text=label, style="Muted.TLabel").grid(row=r, column=0, sticky="w", pady=6, padx=(0, 10))
             if choices is not None:
-                cb = ttk.Combobox(grid, textvariable=var, values=choices, state="readonly")
+                cb = ttk.Combobox(grid, textvariable=var, values=choices, state="normal")
                 cb.grid(row=r, column=1, sticky="ew", pady=6)
             else:
                 ent = ttk.Entry(grid, textvariable=var)
@@ -626,15 +620,18 @@ class EditConfigDialog(BaseDialog):
         # If no pyserial, show Entry widgets.
         # port_choices = ports if ports and _HAS_SERIAL else None
         port_choices = ([""] + valid_ports) if has_valid_ports else None
-        row(0, "COM_LASER", self.v_com_laser, port_choices)
-        row(1, "COM_SFC", self.v_com_sfc, port_choices)
-        row(2, "COM_SCAN", self.v_com_scan, port_choices)
+        row_num = 0
+        row(row_num := row_num + 1, "COM_LASER", self.v_com_laser, port_choices)
+        row(row_num := row_num + 1, "COM_SFC", self.v_com_sfc, port_choices)
+        if SHOW_SCAN_UI:
+            row(row_num := row_num + 1, "COM_SCAN", self.v_com_scan, port_choices)
 
-        ttk.Separator(grid, style="Thin.TSeparator").grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(grid, style="Thin.TSeparator").grid(row=(row_num := row_num + 1), column=0, columnspan=2, sticky="ew", pady=10)
 
-        row(4, "BAUDRATE_LASER", self.v_baud_laser, None)
-        row(5, "BAUDRATE_SFC", self.v_baud_sfc, None)
-        row(6, "BAUDRATE_SCAN", self.v_baud_scan, None)
+        row((row_num := row_num + 1), "BAUDRATE_LASER", self.v_baud_laser, None)
+        row((row_num := row_num + 1), "BAUDRATE_SFC", self.v_baud_sfc, None)
+        if SHOW_SCAN_UI:
+            row((row_num := row_num + 1), "BAUDRATE_SCAN", self.v_baud_scan, None)
 
         hint_text = (
             "Tip: Không detect được port (pyserial OK nhưng list rỗng) -> các ô COM sẽ là entry để bạn nhập tay."
@@ -981,14 +978,16 @@ class LASERLINKAPP(tk.Tk):
 
         self._v_cfg_laser = tk.StringVar(value="")
         self._v_cfg_sfc   = tk.StringVar(value="")
-        self._v_cfg_scan  = tk.StringVar(value="")
+        if SHOW_SCAN_UI:
+            self._v_cfg_scan  = tk.StringVar(value="")
 
         ttk.Label(cfg_box, textvariable=self._v_cfg_laser, style="Muted.TLabel", wraplength=330)\
             .pack(anchor="w", pady=(6, 0))
         ttk.Label(cfg_box, textvariable=self._v_cfg_sfc, style="Muted.TLabel", wraplength=330)\
             .pack(anchor="w", pady=(3, 0))
-        ttk.Label(cfg_box, textvariable=self._v_cfg_scan, style="Muted.TLabel", wraplength=330)\
-            .pack(anchor="w", pady=(3, 0))
+        if SHOW_SCAN_UI:
+            ttk.Label(cfg_box, textvariable=self._v_cfg_scan, style="Muted.TLabel", wraplength=330)\
+                .pack(anchor="w", pady=(3, 0))
 
         # initial + periodic refresh
         self._refresh_config_summary()
@@ -1008,7 +1007,7 @@ class LASERLINKAPP(tk.Tk):
 
         self.btn_mock = ttk.Button(self.left, text="Start Mock UX", style="Flat.TButton", takefocus=False, command=self._toggle_mock)
         self.btn_mock.pack(fill="x")
-        # self.btn_mock.configure(state="disabled")  # disable mock UX for now
+        self.btn_mock.configure(state="disabled")  # disable mock UX for now
 
         # Right panel: log
         ttk.Label(self.right, text="LOG", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
@@ -1040,22 +1039,6 @@ class LASERLINKAPP(tk.Tk):
 
         # status default for new UX
         self.set_status("READY", "Select/Enter MO, then scan H Box Code")
-
-        # ---- core runtime ----
-        # self._core_q = queue.SimpleQueue()
-        # self._core_thread: Optional[threading.Thread] = None
-        # self.bridge = None
-        # self._last_result_ts = 0.0
-        # self._last_result_status = ""
-
-        # đảm bảo có handler đóng app
-        # self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # # start core
-        # self._start_core()
-
-        # # poll core state
-        # self.after(100, self._poll_core_state)
 
     # TODO: refactor enable/disable inputs
     def disable_inputs(self):
@@ -1206,7 +1189,8 @@ class LASERLINKAPP(tk.Tk):
 
         self._v_cfg_laser.set(f"LASER: {snap.get('COM_LASER','')}:{snap.get('BAUDRATE_LASER','')}")
         self._v_cfg_sfc.set(  f"SFC:   {snap.get('COM_SFC','')}:{snap.get('BAUDRATE_SFC','')}")
-        self._v_cfg_scan.set( f"SCAN:  {snap.get('COM_SCAN','')}:{snap.get('BAUDRATE_SCAN','')}")
+        if SHOW_SCAN_UI:
+            self._v_cfg_scan.set( f"SCAN:  {snap.get('COM_SCAN','')}:{snap.get('BAUDRATE_SCAN','')}")
 
     # -----------------------------
     # ✅ MO picker
@@ -1311,7 +1295,7 @@ class LASERLINKAPP(tk.Tk):
         self._selected_mo_runtime = mo
 
         self._refresh_mo_picker(select=mo)
-        self._v_mo_status.set("MO đã tồn tại → set selected" if existed else "Đã lưu MO mới → set selected")
+        self._v_mo_status.set(f"MO {mo} đã tồn tại → sẵn sàng scan" if existed else f"Đã lưu MO {mo} → sẵn sàng scan")
         self.append_log(f"[OK] MO {'selected' if existed else 'saved'} -> {mo}")
         self._focus_scan()
 
@@ -1698,9 +1682,6 @@ class LASERLINKAPP(tk.Tk):
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    def _set_status_colors(self, fg: str):
-        self.status_big.configure(foreground=fg)
-    
     def _apply_status_theme(self, bg: str, big_fg: str, sub_fg: str) -> None:
         # Update styles so whole status card changes background
         self._style.configure("StatusCard.TFrame", background=bg)
@@ -1823,8 +1804,6 @@ class LASERLINKAPP(tk.Tk):
             self._refresh_config_summary()
             self._refresh_model_picker()
             self._refresh_mo_picker()
-            # self.after(800, self._tick_model_picker)
-            # self.after(800, self._tick_mo_picker)
             self.logger.info("[OK] Reloaded config.ini via CFG")
             self.set_status("OK", "Config loaded")
         except Exception as e:
@@ -1846,7 +1825,7 @@ class LASERLINKAPP(tk.Tk):
                 ok = bool(self.cfg.update_sections({
                     "COM": com_updates,
                     "BAUDRATE": {k: str(v) for k, v in baud_updates.items()},
-                }, make_backup=True, reload_after=True))
+                }, make_backup=False, reload_after=True))
                 if ok:
                     self.logger.info("[OK] Saved config.ini via CFG.update_sections()")
                     self._refresh_config_summary()
@@ -1857,121 +1836,3 @@ class LASERLINKAPP(tk.Tk):
 
         except Exception as e:
             return False, f"Write failed: {e}"
-
-    # -----------------------------
-    # --------- Core logic ---------
-    # -----------------------------
-    # def _start_core(self) -> None:
-    #     if self.cfg is None or LaserSfcBridge is None:
-    #         self.append_log("[CORE] LaserSfcBridge import failed -> core not started", logging.ERROR)
-    #         self.set_status("ERROR", "Core not available")
-    #         return
-
-    #     def on_result(status: str, laser_req: str, sfc_resp: str) -> None:
-    #         # chạy trong core thread -> chỉ push queue
-    #         try:
-    #             self._core_q.put((time.monotonic(), status, laser_req, sfc_resp))
-    #         except Exception:
-    #             pass
-
-    #     try:
-    #         self.bridge = LaserSfcBridge(
-    #             self.cfg,
-    #             log=self.append_log,       # thread-safe (đi qua logger)
-    #             on_result=on_result,
-    #             sfc_timeout=5.0,
-    #             idle_sleep=0.01,
-    #             break_on_reload=False,
-    #         )
-    #     except Exception as e:
-    #         self.append_log(f"[CORE] init failed: {e}", logging.ERROR)
-    #         self.set_status("ERROR", "Core init failed")
-    #         return
-
-    #     self._core_thread = threading.Thread(target=self.bridge.run_forever, daemon=True)
-    #     self._core_thread.start()
-    #     self.append_log("[CORE] started", logging.INFO)
-    #     self.set_status("LISTENING", "Waiting for LASER trigger...")
-
-    # def _poll_core_state(self) -> None:
-    #     try:
-    #         # 1) Drain result queue (PASS/FAIL/TIMEOUT/...)
-    #         while True:
-    #             try:
-    #                 ts, status, laser_req, sfc_resp = self._core_q.get_nowait()
-    #             except Exception:
-    #                 break
-
-    #             self._last_result_ts = ts
-    #             self._last_result_status = (status or "").upper()
-
-    #             # Flash PASS/FAIL rõ ràng cho công nhân
-    #             if self._last_result_status in ("PASS", "FAIL"):
-    #                 desc = f"SFC: {sfc_resp}"
-    #                 self.set_status(self._last_result_status, desc[:120])
-    #             elif self._last_result_status in ("TIMEOUT", "SFC_ERROR"):
-    #                 self.set_status("ERROR", f"{status}: {str(sfc_resp)[:120]}")
-    #             else:
-    #                 self.set_status("WARN", f"{status}: {str(sfc_resp)[:120]}")
-
-    #         # 2) Nếu không có “result flash” gần đây -> bám theo mode (Listening/Testing/Error)
-    #         if self.bridge is not None:
-    #             now = time.monotonic()
-    #             flash_active = (now - float(self._last_result_ts)) < 1.2 and self._last_result_status in ("PASS", "FAIL")
-
-    #             if not flash_active:
-    #                 ok, com_laser, txt = self.bridge.get_status_triplet()
-    #                 mode = (self.bridge.get_mode() or "").upper()
-
-    #                 if mode == "LISTENING":
-    #                     self.set_status("LISTENING", f"LASER={com_laser}")
-    #                 elif mode == "TESTING":
-    #                     st, last_req, _ = self.bridge.get_last_result()
-    #                     self.set_status("TESTING", f"LASER->SFC... ({str(last_req)[:60]})")
-    #                 elif mode == "ERROR":
-    #                     self.set_status("ERROR", self.bridge.get_last_error()[:140])
-    #                 elif mode == "STOPPED":
-    #                     self.set_status("STOPPED", "Core stopped")
-    #                 else:
-    #                     self.set_status("STANDBY", txt[:140])
-
-    #     except Exception as e:
-    #         # tuyệt đối không để poll làm crash UI
-    #         try:
-    #             self.append_log(f"[UI] _poll_core_state error: {e}", logging.ERROR)
-    #         except Exception:
-    #             pass
-    #     finally:
-    #         self.after(100, self._poll_core_state)
-
-    # def _on_close(self) -> None:
-    #     # Không join trực tiếp (sẽ freeze UI). Request stop rồi poll thread.
-    #     try:
-    #         self.set_status("STOPPED", "Stopping core...")
-    #     except Exception:
-    #         pass
-
-    #     try:
-    #         if self.bridge is not None:
-    #             self.bridge.request_stop()
-    #     except Exception:
-    #         pass
-
-    #     self._close_deadline = time.monotonic() + 6.0  # tối đa chờ 6s (read_timeout)
-    #     self.after(50, self._finalize_close)
-
-    # def _finalize_close(self) -> None:
-    #     try:
-    #         th = self._core_thread
-    #         if th and th.is_alive():
-    #             # quá deadline thì vẫn đóng UI (core thread là daemon)
-    #             if time.monotonic() < getattr(self, "_close_deadline", 0):
-    #                 self.after(50, self._finalize_close)
-    #                 return
-    #         self.destroy()
-    #     except Exception:
-    #         # fallback cực đoan: vẫn thoát
-    #         try:
-    #             self.destroy()
-    #         except Exception:
-    #             pass
