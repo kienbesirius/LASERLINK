@@ -136,7 +136,9 @@ class ConfigManager:
     def __init__(self, config_path: Path, log: Callable[[str], None] = print):
         self.config_path = Path(config_path)
         self.log = log
-
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(self.config_path, encoding="utf-8")
+        self._cp = cp
         self._mtime_ns: int = -1
         self._com: Optional[ComConfig] = None
         self._baud: Optional[BaudrateConfig] = None
@@ -147,7 +149,8 @@ class ConfigManager:
         self._mos: dict[int, str] = {}
         self._mo_picker: Optional[MoPickerConfig] = None
         self._latest_mo: str = ""
-
+        self.timeout: dict[str, float] = {}
+        
         # ensure file exists + patch missing keys
         try:
             ensure_config_ini(self.log)
@@ -211,13 +214,10 @@ class ConfigManager:
         except Exception as e:
             self.log(f"[WARN] ensure_config_ini failed: {e}")
 
-        cp = configparser.ConfigParser(interpolation=None)
-        cp.read(self.config_path, encoding="utf-8")
-
         # ---- load COM ----
-        com_laser = cp.get(self.SEC_COM, "COM_LASER", fallback="COM1")
-        com_sfc   = cp.get(self.SEC_COM, "COM_SFC",   fallback="COM2")
-        com_scan  = cp.get(self.SEC_COM, "COM_SCAN",  fallback="COM3")
+        com_laser = self._cp.get(self.SEC_COM, "COM_LASER", fallback="COM1")
+        com_sfc   = self._cp.get(self.SEC_COM, "COM_SFC",   fallback="COM2")
+        com_scan  = self._cp.get(self.SEC_COM, "COM_SCAN",  fallback="COM3")
 
         self._com = ComConfig(
             COM_LASER=normalize_windows_com_port(com_laser),
@@ -227,7 +227,7 @@ class ConfigManager:
 
         # ----- BAUDRATE -----
         def get_int(section: str, key: str, default: int) -> int:
-            raw = cp.get(section, key, fallback=str(default)).strip()
+            raw = self._cp.get(section, key, fallback=str(default)).strip()
             try:
                 return int(raw)
             except ValueError:
@@ -254,10 +254,42 @@ class ConfigManager:
         self._load_models()
         self._load_mos()   # ✅ NEW
         
-        last_sel = cp.get(self.SEC_MO_PICKER, "LAST_SELECTED_MO", fallback="").strip()
+        last_sel = self._cp.get(self.SEC_MO_PICKER, "LAST_SELECTED_MO", fallback="").strip()
         self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=last_sel)
 
+        self.timeout = self._load_timeout_dict()
         return True
+
+    def _load_timeout_dict(self) -> dict[str, float]:
+        """
+        Return TIMEOUT section as float dict.
+        Uses DEFAULTS fallback, clamps invalid/<=0 back to default.
+        """
+        out: dict[str, float] = {}
+        defaults = DEFAULTS.get("TIMEOUT", {})
+
+        # If you store configparser as self._cp (or similar), use it here.
+        # Replace self._cp with your actual configparser object.
+        cp = self._cp
+
+        for key, default_s in defaults.items():
+            raw = ""
+            try:
+                raw = cp.get("TIMEOUT", key, fallback=default_s)
+            except Exception:
+                raw = default_s
+
+            try:
+                val = float(str(raw).strip())
+            except Exception:
+                val = float(default_s)
+
+            if val <= 0:
+                val = float(default_s)
+
+            out[key] = val
+
+        return out
 
     def _load_models(self):
         def _parse_section_pairs(sec_name: str) -> list[tuple[str, str]]:
@@ -453,16 +485,21 @@ class ConfigManager:
             if persist:
                 return bool(self.update_sections(
                     {self.SEC_MO_PICKER: {"LAST_SELECTED_MO": canon}},
-                    make_backup=True,
+                    make_backup=False,
                     reload_after=True,
                 ))
             return True
 
-        # ✅ chưa có -> add mới
-        next_idx = (max(self._mos.keys()) + 1) if self._mos else 1
-        key = f"mo{next_idx}"
+        # ✅ chưa có -> add mới [Save single MO]
+        key = f"mo1"
+        self._mos[1] = v
 
-        self._mos[next_idx] = v
+        # # ✅ chưa có -> add mới [Save many MO]
+        # next_idx = (max(self._mos.keys()) + 1) if self._mos else 1
+        # key = f"mo{next_idx}"
+
+        # self._mos[next_idx] = v
+
         self._latest_mo = v
         self._mo_picker = MoPickerConfig(LAST_SELECTED_MO=v)
 
@@ -472,7 +509,7 @@ class ConfigManager:
                     self.SEC_MO: {key: v},
                     self.SEC_MO_PICKER: {"LAST_SELECTED_MO": v},
                 },
-                make_backup=True,
+                make_backup=False,
                 reload_after=True,
             ))
         return True
@@ -496,7 +533,7 @@ class ConfigManager:
         if persist:
             return bool(self.update_sections(
                 {self.SEC_MO_PICKER: {"LAST_SELECTED_MO": v}},
-                make_backup=True,
+                make_backup=False,
                 reload_after=True,
             ))
         return True
@@ -659,7 +696,7 @@ class ConfigManager:
         if persist:
             ok = bool(self.update_sections(
                 {self.SEC_MODEL: {canon_mid: canon_np}},
-                make_backup=True,
+                make_backup=False,
                 reload_after=True,
             ))
             if not ok:
@@ -698,7 +735,7 @@ class ConfigManager:
             try:
                 self.update_sections(
                     {self.SEC_MODEL_PICKER: {"CURRENT_SELECTED_MODEL": model}},
-                    make_backup=True,
+                    make_backup=False,
                     reload_after=True,
                 )
             except Exception as e:

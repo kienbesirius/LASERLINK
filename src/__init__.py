@@ -40,6 +40,10 @@ DEFAULTS: Dict[str, Dict[str, str]] = {
         "BAUDRATE_SFC": "9600",
         "BAUDRATE_SCAN": "9600",
     },
+    "TIMEOUT":{
+        "LASER_TX_SEC": "120",
+        "SFC_TX_SEC": "7"
+    },
     # Break rules cho kiểu đọc readline (text/line-based COM)
     "SERIAL_READLINE_BREAK": {
         # TOKENS: ưu tiên cao (từ trái sang phải)

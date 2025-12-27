@@ -114,10 +114,34 @@ MUTED = "#6B7280"
 OK_FG = "#0F5132"
 ERR_FG = "#842029"
 WARN_FG = "#7A4B00"
+
 EDIT_KEY_ENV = "LASERLINK_EDIT_KEY"
 DEFAULT_EDIT_KEY = "Laserlinkfii168!!"          # đổi tuỳ bạn
+
 EDIT_UNLOCK_TTL_SEC = 3       # unlock tạm 3 giây sau khi nhập đúng
 SHOW_SCAN_UI = False
+
+# ----- Your stimulation pool (PASS/FAIL variants) -----
+STIMULATION = True
+
+RESP_POOL = {
+    "resp1": {
+        "PASS": "2505004562,H25101801031,PASS",
+        "FAIL": "2505004562,H25101801031,FAIL",
+    },
+    "resp2": {
+        "PASS": "2505004562,PF2AS04TE,P072UT02243604N5,P072UT02243604N6,P072UT02243604N7,P072UT02243604N8,2505004562,PF2AS04TE,P072UT02243604N5,P072UT02243604N6,P072UT02243604N7,P072UT02243604N8,PASS",
+        "FAIL": "2505004562,PF2AS04TE,P072UT02243604N5,P072UT02243604N6,P072UT02243604N7,P072UT02243604N82505004562,PF2AS04TE,P072UT02243604N5,P072UT02243604N6,P072UT02243604N7,P072UT02243604N8,FAIL",
+    },
+    "laser_resp": {
+        "PASS": "2505004562,PF2AS04TE,PASSED=1",
+        "FAIL": "2505004562,PF2AS04TE,PASSED=0,FAIL03",
+    },
+    "resp4": {
+        "PASS": "2505004562,PF2AS04TE,PASSED=1PASS",
+        "FAIL": "2505004562,PF2AS04TE,PASSED=0,FAIL03PASS",
+    },
+}
 
 # -----------------------------
 # Config (source of truth = src.core.CFG)
@@ -126,6 +150,7 @@ SHOW_SCAN_UI = False
 # All COM/BAUDRATE/RULES should be read & written via the singleton CFG in src.core.
 try:
     from src.core import CFG, send_text_and_wait  # type: ignore
+    from src.gui.gui_KIP import KPIWidget
 except Exception:
     CFG = None  # type: ignore
 
@@ -293,7 +318,7 @@ class InfoDialog(BaseDialog):
     dismiss_on_backdrop = True
 
     def __init__(self, host: DialogHost, info_text: str):
-        super().__init__(host, "INFO", width=640)
+        super().__init__(host, "INFO")
         txt = ScrolledText(self.body, height=14, wrap="word")
         txt.insert("1.0", info_text)
         txt.configure(state="disabled")
@@ -326,7 +351,7 @@ class ModelEditDialog(ttk.Frame):
 
         # Center card
         self.card = ttk.Frame(self, style="Card.TFrame", padding=16)
-        self.card.place(relx=0.5, rely=0.5, anchor="center", width=920, height=560)
+        self.card.grid(row=0, column=0, sticky="nsew")
         self.card.columnconfigure(0, weight=0)
         self.card.columnconfigure(1, weight=1)
         self.card.rowconfigure(1, weight=1)
@@ -520,9 +545,8 @@ class EditKeyDialog(BaseDialog):
         title: str = "ENTER KEY",
         context_text: str = "Nhập mã key để mở chức năng chỉnh sửa.",
         error_text: str = "Sai key. Vui lòng thử lại hoặc liên hệ TE/Engineer. 5935 - 70626",
-        width: int = 520,
     ):
-        super().__init__(host, title, width=width)
+        super().__init__(host, title)
         self.app = app
         self._on_success = on_success
         self._error_text = error_text
@@ -570,7 +594,7 @@ class EditConfigDialog(BaseDialog):
     dismiss_on_backdrop = False
 
     def __init__(self, host: DialogHost, app: "LASERLINKAPP"):
-        super().__init__(host, "EDIT CONFIG.INI", width=740)
+        super().__init__(host, "EDIT CONFIG.INI")
         self.app = app
 
         # Vars
@@ -811,6 +835,9 @@ class LASERLINKAPP(tk.Tk):
         self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
+        # self.kpi = KPIWidget(parent_frame, donut_size=50)
+        # self.kpi.pack(side="left")  # or grid/place - your parent decides
+
         # Model row 
         # ✅ new model row
         self.model_card = ttk.Frame(self.container, style="Card.TFrame", padding=14)
@@ -1025,6 +1052,9 @@ class LASERLINKAPP(tk.Tk):
 
         self.reload_config()
         self.set_status("IDLE", "Ready.")
+
+        # self.kpi = KPIWidget(parent_frame, donut_size=50)
+        # self.kpi.pack(side="left")  # or grid/place - your parent decides
 
         # TODO
         # ---- flow runtime (NEW) ----
@@ -1367,14 +1397,15 @@ class LASERLINKAPP(tk.Tk):
 
         self.H_code = cleaned
         self._v_h_scan.set(cleaned)
-        self.append_log(f"[SCAN] H_code -> {cleaned}")
+        if not self._flow_running:
+            self.append_log(f"[SCAN] H_code -> {cleaned}")
         self._start_flow_from_ui()
 
     def _start_flow_from_ui(self) -> None:
         # chống chạy chồng
         with self._flow_lock:
             if self._flow_running:
-                self.append_log("[FLOW] already running -> ignore scan", logging.WARNING)
+                # self.append_log("[FLOW] already running -> ignore scan", logging.WARNING)
                 return
             self._flow_running = True
 
@@ -1430,98 +1461,151 @@ class LASERLINKAPP(tk.Tk):
         3) TX LASER: <raw SFC resp2> -> RX Laser (timeout=60) -> (timeout => FAIL)
         4) TX SFC: <laser result> -> RX -> FAIL/PASS final
         """
-        cfg = self.cfg or CFG
-        cfg.reload_if_changed()
-        com = cfg.com
-        baud = cfg.baudrate
+        import random
+        def pick_stimulation(pass_prob: float = 0.85, *, rng: random.Random | None = None) -> dict[str, str]:
+            """
+            Pick one random response for each step.
+            pass_prob: probability of choosing PASS variant for each step (0..1)
+            """
+            if rng is None:
+                rng = random.Random()
 
-        def emit(kind: str, **payload):
-            self._flow_q.put((kind, payload))
+            def pick(step: str) -> str:
+                verdict = "PASS" if rng.random() < pass_prob else "FAIL"
+                return RESP_POOL[step][verdict]
 
-        def fail(stage: str, desc: str, detail: str = ""):
-            emit("DONE", ok=False, status="FAIL", stage=stage, desc=desc, detail=detail)
+            return {
+                "resp1": pick("resp1"),
+                "resp2": pick("resp2"),
+                "laser_resp": pick("laser_resp"),
+                "resp4": pick("resp4"),
+            }
+        # ----- Example usage in your flow -----
+        stim = pick_stimulation(pass_prob=0.8)  # change probability if you want more PASS
 
-        def okpass(stage: str, desc: str, detail: str = ""):
-            emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
+        try:
+            cfg = self.cfg or CFG
+            cfg.reload_if_changed()
+            com = cfg.com
+            baud = cfg.baudrate
+            SFC_TX_SEC = cfg.timeout.get("SFC_TX_SEC", 7.0)
+            LASER_TX_SEC = cfg.timeout.get("LASER_TX_SEC", 120.0)
 
-        # ---------------- 1) SFC: MO,H ----------------
-        emit("STAGE", code="TESTING", desc="SFC: checking MO,H ...", stage="SFC_MO_H_TX")
-        ok1, resp1 = send_text_and_wait(
-            f"{mo},{h}",
-            port=com.COM_SFC,
-            baudrate=baud.BAUDRATE_SFC,
-            write_append_crlf=True,
-            read_timeout=8.0,
-            log_callback=self.append_log,
-        )
-        if not ok1:
-            return fail("SFC_MO_H", "SFC no response / timeout", resp1)
+            def emit(kind: str, **payload):
+                self._flow_q.put((kind, payload))
 
-        st1 = infer_status(resp1) or "UNKNOWN"
-        emit("LOG", text=f"[SFC][MO,H] {resp1}")
-        if st1 == "FAIL":
-            return fail("SFC_MO_H", "SFC returned FAIL", resp1)
+            def fail(stage: str, desc: str, detail: str = ""):
+                emit("DONE", ok=False, status="FAIL", stage=stage, desc=desc, detail=detail)
 
-        # ---------------- 2) SFC: MO,NEEDPSNxx ----------------
-        # nếu needpsn không có từ model mapping -> thử parse từ resp1
-        if not needpsn:
-            needpsn = find_needpsn(resp1) or ""
-        if not needpsn:
-            # bạn có thể đổi thành FAIL hoặc WARN tùy spec; mình fail để khỏi chạy sai
-            return fail("NEEDPSN", f"Missing NEEDPSN for model={model}", resp1)
+            def okpass(stage: str, desc: str, detail: str = ""):
+                emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
 
-        emit("STAGE", code="TESTING", desc=f"SFC: request {needpsn} ...", stage="SFC_NEEDPSN_TX")
-        ok2, resp2 = send_text_and_wait(
-            f"{mo},{needpsn}",
-            port=com.COM_SFC,
-            baudrate=baud.BAUDRATE_SFC,
-            write_append_crlf=True,
-            read_timeout=8.0,
-            log_callback=self.append_log,
-        )
-        if not ok2:
-            return fail("SFC_NEEDPSN", "SFC no response / timeout", resp2)
+            # ---------------- 1) SFC: MO,H ----------------
+            emit("STAGE", code="TESTING", desc="SFC: checking MO,H ...", stage="SFC_MO_H_TX")
+            ok1, resp1 = send_text_and_wait(
+                f"{mo},{h}",
+                port=com.COM_SFC,
+                baudrate=baud.BAUDRATE_SFC,
+                write_append_crlf=True,
+                read_timeout=SFC_TX_SEC,
+                log_callback=self.append_log,
+            )
 
-        st2 = infer_status(resp2) or "UNKNOWN"
-        emit("LOG", text=f"[SFC][{needpsn}] {resp2}")
-        if st2 == "FAIL":
-            return fail("SFC_NEEDPSN", "SFC returned FAIL", resp2)
+            if STIMULATION:
+                time.sleep(0.34576)  # slight delay to let UI update
+                resp1 = stim["resp1"]
+                ok1 = True
+                self.append_log(f"[SFC][MO,H][STIMULATION] {resp1}")
+            if not ok1:
+                return fail("SFC_MO_H", "SFC no response / timeout", resp1)
 
-        # ---------------- 3) LASER: send SFC resp2 (timeout 60s) ----------------
-        emit("STAGE", code="TESTING", desc="LASER: running ... (timeout 60s)", stage="LASER_TX")
-        ok3, laser_resp = send_text_and_wait(
-            resp2,
-            port=com.COM_LASER,
-            baudrate=baud.BAUDRATE_LASER,
-            write_append_crlf=True,
-            read_timeout=60.0,
-            log_callback=self.append_log,
-        )
-        if not ok3:
-            return fail("LASER", "LASER timeout / no response", laser_resp)
+            
+            st1 = infer_status(resp1) or "UNKNOWN"
+            emit("LOG", text=f"[SFC][MO,H] {resp1}")
+            if st1 == "FAIL":
+                return fail("SFC_MO_H", "SFC returned FAIL", resp1)
 
-        emit("LOG", text=f"[LASER][RX] {laser_resp}")
+            # ---------------- 2) SFC: MO,NEEDPSNxx ----------------
+            # nếu needpsn không có từ model mapping -> thử parse từ resp1
+            if not needpsn:
+                needpsn = find_needpsn(resp1) or ""
+            if not needpsn:
+                # bạn có thể đổi thành FAIL hoặc WARN tùy spec; mình fail để khỏi chạy sai
+                return fail("NEEDPSN", f"Missing NEEDPSN for model={model}", resp1)
 
-        # ---------------- 4) SFC final: send laser result ----------------
-        emit("STAGE", code="TESTING", desc="SFC: finalizing ...", stage="SFC_FINAL_TX")
-        ok4, resp4 = send_text_and_wait(
-            laser_resp,
-            port=com.COM_SFC,
-            baudrate=baud.BAUDRATE_SFC,
-            write_append_crlf=True,
-            read_timeout=10.0,
-            log_callback=self.append_log,
-        )
-        if not ok4:
-            return fail("SFC_FINAL", "SFC no response / timeout", resp4)
+            emit("STAGE", code="TESTING", desc=f"SFC: request {needpsn} ...", stage="SFC_NEEDPSN_TX")
+            ok2, resp2 = send_text_and_wait(
+                f"{mo},{needpsn}",
+                port=com.COM_SFC,
+                baudrate=baud.BAUDRATE_SFC,
+                write_append_crlf=True,
+                read_timeout=SFC_TX_SEC,
+                log_callback=self.append_log,
+            )
 
-        st4 = infer_status(resp4) or "UNKNOWN"
-        emit("LOG", text=f"[SFC][FINAL] {resp4}")
+            if STIMULATION:
+                time.sleep(0.34576)  # slight delay to let UI update
+                resp2 = stim["resp2"]
+                ok2 = True
+                self.append_log(f"[SFC][{needpsn}][STIMULATION] {resp2}")
+            if not ok2:
+                return fail("SFC_NEEDPSN", "SFC no response / timeout", resp2)
 
-        if st4 == "PASS":
-            return okpass("DONE", "PASS", resp4)
-        return fail("SFC_FINAL", "FAIL", resp4)
+            st2 = infer_status(resp2) or "UNKNOWN"
+            emit("LOG", text=f"[SFC][{needpsn}] {resp2}")
+            if st2 == "FAIL":
+                return fail("SFC_NEEDPSN", "SFC returned FAIL", resp2)
 
+            # ---------------- 3) LASER: send SFC resp2 (timeout 60s) ----------------
+            emit("STAGE", code="TESTING", desc="LASER: running ... (timeout 60s)", stage="LASER_TX")
+            ok3, laser_resp = send_text_and_wait(
+                resp2,
+                port=com.COM_LASER,
+                baudrate=baud.BAUDRATE_LASER,
+                write_append_crlf=True,
+                read_timeout=LASER_TX_SEC,
+                log_callback=self.append_log,
+            )
+
+            if STIMULATION:
+                time.sleep(0.34576)  # slight delay to let UI update
+                laser_resp = stim["laser_resp"]
+                ok3 = True
+                self.append_log(f"[LASER][STIMULATION] {laser_resp}")
+            if not ok3:
+                return fail("LASER", "LASER timeout / no response", laser_resp)
+
+            emit("LOG", text=f"[LASER][RX] {laser_resp}")
+
+            # ---------------- 4) SFC final: send laser result ----------------
+            emit("STAGE", code="TESTING", desc="SFC: finalizing ...", stage="SFC_FINAL_TX")
+            ok4, resp4 = send_text_and_wait(
+                laser_resp,
+                port=com.COM_SFC,
+                baudrate=baud.BAUDRATE_SFC,
+                write_append_crlf=True,
+                read_timeout=SFC_TX_SEC,
+                log_callback=self.append_log,
+            )
+
+            if STIMULATION:
+                time.sleep(0.34576)  # slight delay to let UI update
+                resp4 = stim["resp4"]
+                ok4 = True
+                self.append_log(f"[SFC][FINAL][STIMULATION] {resp4}")
+            if not ok4:
+                return fail("SFC_FINAL", "SFC no response / timeout", resp4)
+
+            st4 = infer_status(resp4) or "UNKNOWN"
+            emit("LOG", text=f"[SFC][FINAL] {resp4}")
+
+            if st4 == "PASS":
+                return okpass("DONE", "PASS END", resp4)
+            return fail("SFC_FINAL", "FAIL END", resp4)
+        except Exception as e:
+            emit("DONE", ok=False, status="ERROR", desc="Flow exception", detail=str(e))
+            return fail("EXCEPTION", "Flow exception", str(e))
+        
     def _poll_flow_events(self) -> None:
         try:
             while True:
