@@ -37,8 +37,8 @@ class KPIWidget(ttk.Frame):
         *,
         donut_size: int = 54,
         bg: str = "#ffffff",
-        base_ring: str = "#ff4c2d",   # fail-ish base ring
-        pass_ring: str = "#2e7d32",   # success
+        base_ring: str = "#ffa494",   # fail-ish base ring
+        pass_ring: str = "#7bff82",   # success
         text_color: str = "#222222",
         label_prefix: str = "cycle_time:",
         font_pct=("Segoe UI", 9, "normal"),
@@ -73,14 +73,25 @@ class KPIWidget(ttk.Frame):
         )
         self.donut.grid(row=0, column=0, sticky="w")
 
+
         self.avg_var = tk.StringVar(value=f"{self._label_prefix} --.- s")
         self.avg_lbl = ttk.Label(self, textvariable=self.avg_var)
-        self.avg_lbl.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.avg_lbl.grid(row=0, column=1, sticky="nsew", padx=(0, 0))
+
+        self._style = ttk.Style(self)
+        self._avg_style = f"KPI.Avg.{id(self)}.TLabel"
+        self._frame_style = f"KPI.{id(self)}.TFrame"
+        self._label_style = f"KPI.{id(self)}.TLabel"
+        self.avg_lbl.configure(style=self._avg_style, font=self._font_avg)
+
+        # apply initial theme to label
+        self._style.configure(self._avg_style, background=self._bg, foreground=self._text_color, font=self._font_avg)
 
         # redraw if resized (when parent decides to stretch it)
         self.donut.bind("<Configure>", lambda e: self._redraw())
 
-        self._redraw()
+        # self._redraw()
+        self.after_idle(self._redraw)
 
     # ---- public API ----
     def update_kpi(
@@ -109,7 +120,8 @@ class KPIWidget(ttk.Frame):
         else:
             self.avg_var.set(f"{self._label_prefix} {self._avg_cycle:.3f} s")
 
-        self._redraw()
+        # self._redraw()
+        self.after_idle(self._redraw)
 
     def set_theme(
         self,
@@ -123,20 +135,61 @@ class KPIWidget(ttk.Frame):
         if bg is not None:
             self._bg = bg
             self.donut.configure(bg=bg)
+            self._style.configure(self._frame_style, background=bg)
+            self._style.configure(self._label_style, background=bg)
         if base_ring is not None:
             self._base_ring = base_ring
         if pass_ring is not None:
             self._pass_ring = pass_ring
         if text_color is not None:
             self._text_color = text_color
-        self._redraw()
+            # update label foreground too
+            try:
+                self._style.configure(self._avg_style, foreground=text_color, background=self._bg)
+            except Exception:
+                pass
+
+        # self._redraw()
+        self.after_idle(self._redraw)
 
     # ---- internal ----
     def _redraw(self) -> None:
-        # canvas actual size
-        W = max(int(self.donut.winfo_width()), 1)
-        H = max(int(self.donut.winfo_height()), 1)
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
 
+        # lấy size an toàn (Tk đôi khi trả 1 khi chưa layout xong)
+        w = int(self.winfo_width() or 0)
+        h = int(self.winfo_height() or 0)
+        size = max(0, min(w, h))
+
+        # nếu quá nhỏ -> delay redraw (đợi layout xong)
+        if size < 6:
+            try:
+                self.after(30, self._redraw)
+            except Exception:
+                pass
+            return
+
+        # ring width phải <= (size//2 - 1) để bbox không bị âm
+        ring_w = int(getattr(self, "ring_w", 6))  # hoặc cách bạn đang tính
+        ring_w = max(1, min(ring_w, (size // 2) - 1))
+
+        pad = ring_w // 2 + 1
+        x0, y0 = pad, pad
+        x1, y1 = size - pad, size - pad
+
+        # guard cuối cùng: bbox phải hợp lệ
+        if x1 < x0 or y1 < y0:
+            return
+        
+        # canvas actual size
+        # W = max(int(self.donut.winfo_width()), 1)
+        # H = max(int(self.donut.winfo_height()), 1)
+        W = H = size
+        
         total = self._rep_total
         pass_rate = (self._rep_pass / total) if total > 0 else 0.0
         pass_rate = min(max(pass_rate, 0.0), 1.0)

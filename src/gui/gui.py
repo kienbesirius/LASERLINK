@@ -835,8 +835,9 @@ class LASERLINKAPP(tk.Tk):
         self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
-        # self.kpi = KPIWidget(parent_frame, donut_size=50)
-        # self.kpi.pack(side="left")  # or grid/place - your parent decides
+        # ✅ KPI donut bên phải (cùng grid manager)
+        self.kpi = KPIWidget(self.status_card, donut_size=50)
+        self.kpi.grid(row=0, column=1, rowspan=3, sticky="e", padx=(14, 0))
 
         # Model row 
         # ✅ new model row
@@ -1053,7 +1054,7 @@ class LASERLINKAPP(tk.Tk):
         self.reload_config()
         self.set_status("IDLE", "Ready.")
 
-        # self.kpi = KPIWidget(parent_frame, donut_size=50)
+        # self.kpi = KPIWidget(cfg_box, donut_size=50)
         # self.kpi.pack(side="left")  # or grid/place - your parent decides
 
         # TODO
@@ -1651,6 +1652,13 @@ class LASERLINKAPP(tk.Tk):
                     with self._flow_lock:
                         self._flow_running = False
 
+                    self.kpi.update_kpi(
+                        avg_cycle=123.43,
+                        cycle_times=[0.8, 1.0, 0.9],
+                        rep_pass=12,
+                        rep_total=15,
+                    )
+
         except Exception as e:
             # không để poll crash UI
             try:
@@ -1780,6 +1788,7 @@ class LASERLINKAPP(tk.Tk):
 
         bg, big_fg, sub_fg = self.STATUS_THEMES.get(code_u, self.STATUS_THEMES["IDLE"])
         self._apply_status_theme(bg, big_fg, sub_fg)
+        self.kpi.set_theme(bg=bg, text_color=big_fg)
 
     # -----------------------------
     # Actions
