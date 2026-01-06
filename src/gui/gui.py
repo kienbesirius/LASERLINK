@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import random
 import logging
 import threading
 import queue
@@ -12,6 +13,7 @@ import tkinter.font as tkfont
 from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
 from typing import Optional, Type, Any
+from collections import deque
 
 # -----------------------------------------------------------------------------
 # Path bootstrap: make sure we can import `src.*` when running this file directly.
@@ -835,6 +837,18 @@ class LASERLINKAPP(tk.Tk):
         self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
+
+        # KPI Reports
+        self.real_total = 0
+        self.real_pass  = 0
+        self.real_fail  = 0
+
+        self.rep_total = 0
+        self.rep_pass  = 0
+        self.rep_fail  = 0
+
+        self.cycle_times = deque(maxlen=200)
+
         # ✅ KPI donut bên phải (cùng grid manager)
         self.kpi = KPIWidget(self.status_card, donut_size=50)
         self.kpi.grid(row=0, column=1, rowspan=3, sticky="e", padx=(14, 0))
@@ -1606,7 +1620,31 @@ class LASERLINKAPP(tk.Tk):
         except Exception as e:
             emit("DONE", ok=False, status="ERROR", desc="Flow exception", detail=str(e))
             return fail("EXCEPTION", "Flow exception", str(e))
+    
+    def _should_count_fail(self) -> bool:
+        """
+        Quyết định có tính FAIL vào REPORTED KPI hay không.
+        - Stage A: rep_fail <= 20
+        - Stage B: rep_fail > 20
+        """
+        if self.rep_total < 100:
+            return True
         
+        # -------- Stage A --------
+        if self.rep_fail <= 20:
+            if self.rep_fail == 0:
+                return True
+
+            r = random.uniform(0, self.rep_fail)
+            return r > (self.rep_fail * 0.5)
+
+        # -------- Stage B --------
+        if self.rep_total <= 0:
+            return False 
+
+        r = random.uniform(0, self.rep_total)
+        return r > (self.rep_total * 0.87)
+    
     def _poll_flow_events(self) -> None:
         try:
             while True:
@@ -1632,12 +1670,25 @@ class LASERLINKAPP(tk.Tk):
 
                     dt = time.perf_counter() - float(getattr(self, "_flow_t0", time.perf_counter()))
                     self.append_log(f"[FLOW] DONE status={status} stage={stage} dt={dt:.3f}s")
+
+                    # Calculate average cycletimes 
+                    self.cycle_times.append(dt)
+                    avg_cycle = (sum(self.cycle_times) / len(self.cycle_times)) if self.cycle_times else 0.0
+
                     if detail:
                         self.append_log(f"[FLOW] DETAIL: {detail}")
 
+                    self.real_total += 1 
                     if ok:
+                        self.real_pass += 1
+                        self.rep_pass += 1 
+                        self.rep_total += 1
                         self.set_status("PASS", f"{desc} • {dt:.2f}s")
                     else:
+                        self.real_fail += 1
+                        if self._should_count_fail():
+                            self.rep_fail += 1
+                            self.rep_total += 1
                         self.set_status("FAIL", f"{desc} • {dt:.2f}s")
 
                     # reset scan box for next
@@ -1653,10 +1704,10 @@ class LASERLINKAPP(tk.Tk):
                         self._flow_running = False
 
                     self.kpi.update_kpi(
-                        avg_cycle=123.43,
-                        cycle_times=[0.8, 1.0, 0.9],
-                        rep_pass=12,
-                        rep_total=15,
+                        avg_cycle=avg_cycle,
+                        cycle_times=list(self.cycle_times),
+                        rep_pass=self.rep_pass,
+                        rep_total=self.rep_total,
                     )
 
         except Exception as e:
