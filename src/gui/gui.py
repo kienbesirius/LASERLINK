@@ -1683,12 +1683,14 @@ class LASERLINKAPP(tk.Tk):
                         self.real_pass += 1
                         self.rep_pass += 1 
                         self.rep_total += 1
+                        self.kpi.update_kpi(ok, cycle_time=dt)
                         self.set_status("PASS", f"{desc} • {dt:.2f}s")
                     else:
                         self.real_fail += 1
                         if self._should_count_fail():
                             self.rep_fail += 1
                             self.rep_total += 1
+                            self.kpi.update_kpi(ok, cycle_time=dt)
                         self.set_status("FAIL", f"{desc} • {dt:.2f}s")
 
                     # reset scan box for next
