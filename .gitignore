@@ -17,7 +17,7 @@ venv.bak/
 # ======================
 # Build / Package
 # ======================
-build/
+/build/
 dist/
 *.egg-info/
 *.egg
