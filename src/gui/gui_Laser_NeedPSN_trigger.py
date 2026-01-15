@@ -750,9 +750,28 @@ class LASERLINKAPP(tk.Tk):
         self.title("LASERLINK")
         self.configure(bg=BG)
 
-        # BookyApp-ish min/max sizing
-        self.minsize(1280, 820)
-        self.maxsize(1280, 820)
+        # Window sizing: allow resizing but enforce a reasonable minimum.
+        # Start maximized, but keep the minimum size at 640x640 so the user
+        # can still resize the window smaller if desired (but not below min).
+        self.minsize(640, 640)
+
+        # Try to start the window maximized. Use multiple fallbacks for
+        # cross-platform compatibility (state('zoomed'), attributes('-zoomed')).
+        try:
+            self.state("zoomed")
+        except Exception:
+            try:
+                # Some platforms support the -zoomed attribute
+                self.attributes("-zoomed", True)
+            except Exception:
+                # Fallback: set geometry to full screen
+                try:
+                    sw = self.winfo_screenwidth()
+                    sh = self.winfo_screenheight()
+                    self.geometry(f"{sw}x{sh}+0+0")
+                except Exception:
+                    # If all else fails, leave default size (min enforced)
+                    pass
 
         # ttk theme
         style = ttk.Style()
@@ -827,6 +846,8 @@ class LASERLINKAPP(tk.Tk):
         self.status_card = ttk.Frame(self.container, style="StatusCard.TFrame", padding=16)
         self.status_card.grid(row=0, column=0, sticky="ew")
         self.status_card.columnconfigure(0, weight=1)
+        # self.status_card.columnconfigure(0, weight=1, minsize=320)
+        # self.status_card.columnconfigure(1, weight=0, minsize=120)
 
         self.status_title = ttk.Label(self.status_card, text="STATUS", style="StatusTitle.TLabel")
         self.status_title.grid(row=0, column=0, sticky="w")
@@ -836,7 +857,6 @@ class LASERLINKAPP(tk.Tk):
 
         self.status_desc = ttk.Label(self.status_card, text="Ready.", style="StatusDesc.TLabel")
         self.status_desc.grid(row=2, column=0, sticky="w", pady=(6, 0))
-
 
         # KPI Reports
         self.real_total = 0
@@ -852,6 +872,14 @@ class LASERLINKAPP(tk.Tk):
         # ✅ KPI donut bên phải (cùng grid manager)
         self.kpi = KPIWidget(self.status_card, donut_size=50)
         self.kpi.grid(row=0, column=1, rowspan=3, sticky="e", padx=(14, 0))
+
+        # Ensure status texts stay above any overlays (e.g., KPI canvas)
+        try:
+            self.status_title.lift()
+            self.status_big.lift()
+            self.status_desc.lift()
+        except Exception:
+            pass
 
         # Model row 
         # ✅ new model row
@@ -874,6 +902,13 @@ class LASERLINKAPP(tk.Tk):
         btns.grid(row=0, column=3, sticky="e")
         ttk.Button(btns, text="Edit Models", style="Flat.TButton", takefocus=False, command=lambda: self.open_edit("models")).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Refresh", style="Flat.TButton", takefocus=False, command=self._refresh_model_picker).pack(side="left")
+        # Keep the model row in the widget hierarchy for logic, but hide it from the UI
+        # so the model data/combobox remain usable programmatically.
+        try:
+            self.model_card.grid_remove()
+        except Exception:
+            # If grid_remove fails for any reason, ignore to preserve behavior
+            pass
 
         # MO - Scan
         # -------------------------
@@ -897,49 +932,6 @@ class LASERLINKAPP(tk.Tk):
 
         style.configure("ScanTitle.TLabel", font=(family, title_size, "bold"))
         style.configure("Scan.TEntry",      font=(family, scan_size,  "bold"))
-
-        # # ---- Row 0: MO + status (same line)
-        # self.mo_row = ttk.Frame(self.mo_scan_card, style="TFrame")
-        # self.mo_row.grid(row=0, column=0, sticky="ew")
-        # self.mo_row.columnconfigure(2, weight=1)
-
-        # ttk.Label(self.mo_row, text="MO", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-
-        # # WO
-        # self._v_mo = tk.StringVar(value="")
-        # self.cb_mo = ttk.Combobox(self.mo_row, textvariable=self._v_mo, state="normal", width=22)
-        # self.cb_mo.grid(row=0, column=1, sticky="w", padx=(10, 12))
-        # self.cb_mo.bind("<<ComboboxSelected>>", lambda _e: self._on_mo_selected())
-        # self.cb_mo.bind("<Return>", lambda _e: self._on_mo_enter())
-
-        # self._mo_mode_auto_latest = True   # ✅ startup = auto latest
-        # self._selected_mo_runtime = ""     # ✅ locked selection for this app session
-
-        # self._v_mo_status = tk.StringVar(value="")  # ✅ status nằm cùng dòng MO
-        # self.lbl_mo_status = ttk.Label(self.mo_row, textvariable=self._v_mo_status, style="Muted.TLabel")
-        # self.lbl_mo_status.grid(row=0, column=2, sticky="ew")
-        
-        # # ---- Row 1: H Code + status (same line)
-        # self.h_code_row = ttk.Frame(self.mo_scan_card, style="TFrame")
-        # self.h_code_row.grid(row=1, column=0, sticky="ew")
-        # self.h_code_row.columnconfigure(2, weight=1)
-
-        # ttk.Label(self.h_code_row, text="H Code", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-
-        # # H Code
-        # self._v_h_code = tk.StringVar(value="")
-        # self.cb_h_code = ttk.Combobox(self.h_code_row, textvariable=self._v_h_code, state="normal", width=22)
-        # self.cb_h_code.grid(row=0, column=1, sticky="w", padx=(10, 12))
-        # self.cb_h_code.bind("<<ComboboxSelected>>", lambda _e: self._on_h_code_selected())
-        # self.cb_h_code.bind("<Return>", lambda _e: self._on_h_code_enter())
-
-        # self._h_code_mode_auto_latest = True   # ✅ startup = auto latest
-        # self._selected_h_code_runtime = ""     # ✅ locked selection for this app session
-
-
-        # self._v_h_code_status = tk.StringVar(value="")  # ✅ status nằm cùng dòng h_code
-        # self.lbl_h_code_status = ttk.Label(self.h_code_row, textvariable=self._v_h_code_status, style="Muted.TLabel")
-        # self.lbl_h_code_status.grid(row=0, column=2, sticky="ew")
 
         # ===== Shared layout constants (gọn đẹp) =====
         LBL_W   = 7      # độ rộng label "MO"/"H Code" (text units)
@@ -1022,18 +1014,65 @@ class LASERLINKAPP(tk.Tk):
         # ---------------------------
         # -----------------------------
 
-        # Content row: left config + right log
+        # Content row: left config (now scrollable) + right log
         self.content = ttk.Frame(self.container, style="TFrame")
         self.content.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         self.content.columnconfigure(0, weight=0)
-        self.content.columnconfigure(1, weight=1)
+        # keep log panel usable even at minimum window size
+        self.content.columnconfigure(1, weight=1, minsize=240)
         self.content.rowconfigure(0, weight=1)
 
-        # Left card (fixed width feel)
-        self.left = ttk.Frame(self.content, style="Card.TFrame", padding=14)
-        self.left.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
-        self.left.configure(width=360)
-        self.left.grid_propagate(False)
+        # Left card made scrollable (hide scrollbar visually). Outer holder keeps width.
+        self.left_holder = ttk.Frame(self.content, style="Card.TFrame", padding=0)
+        self.left_holder.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
+        self.left_holder.configure(width=360)
+        self.left_holder.grid_propagate(False)
+
+        self.left_canvas = tk.Canvas(self.left_holder, highlightthickness=0, bd=0, bg=CARD_BG)
+        self.left_canvas.pack(fill="both", expand=True)
+
+        # Hidden scrollbar for functional scrolling (not packed)
+        self._left_vsb = ttk.Scrollbar(self.left_holder, orient="vertical", command=self.left_canvas.yview)
+        self.left_canvas.configure(yscrollcommand=lambda *_: None)
+
+        # Actual content frame inside canvas
+        self.left = ttk.Frame(self.left_canvas, style="Card.TFrame", padding=14)
+        self._left_window = self.left_canvas.create_window((0, 0), window=self.left, anchor="nw")
+
+        def _on_left_config(event=None):
+            # Update scrollregion and width binding to holder
+            try:
+                self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+                self.left_canvas.itemconfigure(self._left_window, width=self.left_holder.winfo_width())
+            except Exception:
+                pass
+
+        self.left.bind("<Configure>", _on_left_config)
+        self.left_holder.bind("<Configure>", _on_left_config)
+
+        # Mouse wheel scrolling without showing scrollbar
+        def _bind_left_wheel(_event=None):
+            self.left_canvas.bind_all("<MouseWheel>", _on_mousewheel, add=True)
+            self.left_canvas.bind_all("<Button-4>", _on_mousewheel_linux, add=True)
+            self.left_canvas.bind_all("<Button-5>", _on_mousewheel_linux, add=True)
+
+        def _unbind_left_wheel(_event=None):
+            self.left_canvas.unbind_all("<MouseWheel>")
+            self.left_canvas.unbind_all("<Button-4>")
+            self.left_canvas.unbind_all("<Button-5>")
+
+        def _on_mousewheel(event):
+            delta = int(-1 * (event.delta / 120))
+            self.left_canvas.yview_scroll(delta, "units")
+
+        def _on_mousewheel_linux(event):
+            if event.num == 4:
+                self.left_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.left_canvas.yview_scroll(1, "units")
+
+        self.left_holder.bind("<Enter>", _bind_left_wheel)
+        self.left_holder.bind("<Leave>", _unbind_left_wheel)
 
         # Right card: Log
         self.right = ttk.Frame(self.content, style="Card.TFrame", padding=14)
@@ -1088,6 +1127,7 @@ class LASERLINKAPP(tk.Tk):
             ("WARN", "Retrying / Port unstable..."),
             ("ERROR", "Timeout / No response..."),
         ]
+
         # ---- Left panel: CONFIG summary (always visible) ----
         cfg_box = ttk.Frame(self.left, style="InCard.TFrame")
         cfg_box.pack(fill="x")
@@ -1703,6 +1743,11 @@ class LASERLINKAPP(tk.Tk):
 
             def fail(stage: str, desc: str, detail: str = ""):
                 emit("DONE", ok=False, status="FAIL", stage=stage, desc=desc, detail=detail)
+
+            # Check MO code and the str NEEDPSN is in moneysn
+            if not moneysn.upper().__contains__("NEEDPSN") and not moneysn.upper().__contains__(mo):
+                fail("INPUT VALIDATION", "Laser sent data must contain 'NEEDPSN' and MO code example: 2790005577,NEEDPSN12", moneysn)
+                return
 
             def okpass(stage: str, desc: str, detail: str = ""):
                 emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
