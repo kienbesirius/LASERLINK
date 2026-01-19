@@ -156,6 +156,40 @@ try:
 except Exception:
     CFG = None  # type: ignore
 
+# Check Mo,NEEDPSN
+_RX_MONEYSN_LINE = re.compile(
+    r"^\s*([A-Z0-9][A-Z0-9_-]{1,31})\s*,\s*(NEEDPSN\d{1,4})\s*$",
+    re.IGNORECASE,
+)
+_RX_NEEDPSN = re.compile(r"NEEDPSN\d+", re.IGNORECASE)
+_MONEYSN_MIN_LEN = 8
+_MONEYSN_MAX_LEN = 64
+
+
+def parse_moneysn_line(text: str, expected_mo: str) -> tuple[str, str] | None:
+    s = (text or "").replace("\r", "").replace("\n", "").strip()
+    if not s:
+        return None
+    if len(s) < _MONEYSN_MIN_LEN or len(s) > _MONEYSN_MAX_LEN:
+        return None
+
+    exp = (expected_mo or "").strip().upper()
+    if not exp:
+        # Bạn muốn match tuyệt đối -> nếu expected_mo rỗng thì coi như invalid
+        return None
+
+    m = _RX_MONEYSN_LINE.fullmatch(s)
+    if not m:
+        return None
+
+    mo_in = (m.group(1) or "").strip().upper()
+    needpsn = (m.group(2) or "").strip().upper()
+
+    # ✅ match tuyệt đối MO
+    if mo_in != exp:
+        return None
+
+    return (mo_in, needpsn)
 
 class DialogHost(ttk.Frame):
     """
@@ -1080,6 +1114,57 @@ class LASERLINKAPP(tk.Tk):
         self.right.rowconfigure(1, weight=1)
         self.right.columnconfigure(0, weight=1)
 
+        # Responsive behaviour: when window width is small, hide left panel
+        # and let the log occupy the full width. Restores layout when wide.
+        self._left_hidden_by_width = False
+
+        def _update_layout_for_width(width: int | None = None) -> None:
+            try:
+                if width is None:
+                    width = self.winfo_width()
+                # threshold in pixels
+                THRESHOLD = 900
+                if int(width) < THRESHOLD:
+                    if not self._left_hidden_by_width:
+                        try:
+                            self.left_holder.grid_remove()
+                        except Exception:
+                            pass
+                        try:
+                            # Move right to column 0 and span both columns so it truly fills
+                            self.right.grid_configure(column=0, columnspan=2)
+                            # ensure the visible column expands
+                            self.content.columnconfigure(0, weight=1)
+                            self.content.columnconfigure(1, weight=0)
+                        except Exception:
+                            pass
+                        self._left_hidden_by_width = True
+                else:
+                    if self._left_hidden_by_width:
+                        try:
+                            # restore left holder to original grid location
+                            self.left_holder.grid(row=0, column=0, sticky="nsw", padx=(0, 14))
+                        except Exception:
+                            pass
+                        try:
+                            # move right back to column 1 and restore minsize
+                            self.right.grid_configure(column=1, columnspan=1)
+                            self.content.columnconfigure(0, weight=0)
+                            self.content.columnconfigure(1, weight=1, minsize=240)
+                        except Exception:
+                            pass
+                        self._left_hidden_by_width = False
+            except Exception:
+                pass
+
+        # Bind to container resize so layout adjusts dynamically
+        try:
+            self.container.bind("<Configure>", lambda e: _update_layout_for_width(e.width))
+            # apply once at startup
+            _update_layout_for_width(self.winfo_width())
+        except Exception:
+            pass
+
         # Footer row
         self.footer = ttk.Frame(self.container, style="TFrame")
         self.footer.grid(row=4, column=0, sticky="ew", pady=(12, 0))
@@ -1745,9 +1830,13 @@ class LASERLINKAPP(tk.Tk):
                 emit("DONE", ok=False, status="FAIL", stage=stage, desc=desc, detail=detail)
 
             # Check MO code and the str NEEDPSN is in moneysn
-            if not moneysn.upper().__contains__("NEEDPSN") and not moneysn.upper().__contains__(mo):
-                return fail("INPUT VALIDATION", "Laser sent data must contain 'NEEDPSN' and MO code example: 2790005577,NEEDPSN12", moneysn)
-                
+            if not moneysn.upper().__contains__("NEEDPSN") or not moneysn.upper().__contains__(mo):
+                return fail("INPUT VALIDATION", "Laser sent data must contain 'NEEDPSN' or MO code example: 2790005577,NEEDPSN12", moneysn)
+
+            parsed = parse_moneysn_line(moneysn, mo)
+            if not parsed:
+                return fail("INPUT VALIDATION", "Invalid laser data. Expected: <MO>,NEEDPSNxx (e.g., 2790005577,NEEDPSN12)", moneysn)
+
             def okpass(stage: str, desc: str, detail: str = ""):
                 emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
 
@@ -1818,6 +1907,7 @@ class LASERLINKAPP(tk.Tk):
             )
             emit("LOG", text=f"4. Received from SFC: {resp4}")
             emit("LOG", text=f"[SFC FINALIZE TO LASER] {resp4}")
+            
             _not_check_ok5, resp5 = send_text_and_wait(
                 resp4,
                 port=com.COM_LASER,
@@ -2360,8 +2450,13 @@ class LASERLINKAPP(tk.Tk):
                         self._oflow_ser = serial.Serial(
                             port=port,
                             baudrate=baud,
-                            timeout=0.10,
+                            timeout=0.750,
                         )
+                        try:
+                            self._oflow_ser.reset_input_buffer()
+                            self._oflow_ser.reset_output_buffer()
+                        except Exception:
+                            pass
                         self._oflow_last_port = port
                         self._oflow_last_baud = baud
 
