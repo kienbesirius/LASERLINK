@@ -1165,6 +1165,9 @@ def send_text_and_wait(
             response = ""
             raw_buf = bytearray()   # <-- NEW: gom raw bytes
 
+            IDLE_AFTER_MATCH = 0.2
+            post_match_deadline = None
+
             while time.time() < deadline:
                 # readline() phù hợp khi thiết bị có '\n' kết thúc dòng
                 line = ser.readline()
@@ -1190,8 +1193,10 @@ def send_text_and_wait(
                     # upper = response.upper()
                     # TODO: READ LAW FROM CONFIG TO CHECK THE BREAK CONDITIONS
                     if should_break(response, rules):
-                        break
+                        post_match_deadline = time.time() + IDLE_AFTER_MATCH
                 else:
+                    if post_match_deadline and time.time() >= post_match_deadline:
+                        break
                     # Ngủ nhẹ để tránh while loop ăn CPU 100%
                     time.sleep(0.001)
 
@@ -1242,7 +1247,8 @@ def send_text_and_wait(
 
                 log_callback("[Final Used]")
                 log_callback(f"[debug] resp_repr={final_resp!r}")
-                log_callback(f"[debug] has_BOM={'\\ufeff' in final_resp} len={len(final_resp)}")
+                is_bom = '\\ufeff' in final_resp
+                log_callback(f"[debug] has_BOM={is_bom} len={len(final_resp)}")
 
                 # ---- write temp -> log -> read back -> return ----
                 readback = _write_readback_temp_txt(
@@ -1252,6 +1258,115 @@ def send_text_and_wait(
                 )
                 return True, readback.strip()
 
+
+            return False, "No response (timeout)"
+
+    except serial.SerialException as e:
+        log_callback(f"[ERROR] Serial error on {port}: {e}")
+        return False, f"Serial error: {e}"
+
+
+
+def send_text_only(
+    text: str,
+    port: str = "COM7",
+    baudrate: int = 9600,
+    write_append_crlf: bool = True,
+    read_timeout: float = 5.0,
+    log_callback: Callable[[str], None] = print,
+) -> Tuple[bool, str]:
+    try:
+        CFG.reload_if_changed()
+        rules = CFG.rules
+
+        with serial.Serial(port, baudrate, timeout=0) as ser:
+            # ---- SEND ----
+            # Nhiều thiết bị text-based yêu cầu CRLF để kết thúc frame/lệnh.
+            send_str = text + ("\r\n" if write_append_crlf else "")
+            send_bytes = send_str.encode("ascii", errors="replace")
+
+            # Reset buffer để tránh dính data cũ (stale) từ lần trước
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            ser.write(send_bytes)
+            ser.flush()
+            return True, "Sent successfully"
+
+    except serial.SerialException as e:
+        log_callback(f"[ERROR] Serial error on {port}: {e}")
+        return False, f"Serial error: {e}"
+
+
+def send_text_and_polling(
+    text: str,
+    port: str = "COM7",
+    baudrate: int = 9600,
+    write_append_crlf: bool = True,
+    read_timeout: float = 2.0,
+    log_callback: Callable[[str], None] = print,
+    rules: Optional[List["BreakRule"]] = None,
+    idle_after_match: float = 0.2,   # chờ thêm sau khi match break
+    idle_no_new_data: float = 0.3,   # nếu đã có data rồi mà im lặng quá lâu thì coi như xong
+) -> Tuple[bool, str]:
+    try:
+        # nếu bạn vẫn muốn lấy rules từ CFG thì cứ làm như cũ, hoặc truyền rules vào
+        if rules is None:
+            CFG.reload_if_changed()
+            rules = CFG.rules
+
+        # timeout=0 => non-blocking (read trả ngay). Ta tự timeout bằng deadline
+        with serial.Serial(port, baudrate, timeout=0, write_timeout=1.0) as ser:
+            # ---- SEND ----
+            send_str = text + ("\r\n" if write_append_crlf else "")
+            send_bytes = send_str.encode("utf-8", errors="replace")
+
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+
+            ser.write(send_bytes)
+            ser.flush()
+
+            # ---- WAIT RESPONSE (BYTE-BASED) ----
+            deadline = time.time() + read_timeout
+            response = ""  # decode dần ra string để check break rules
+            last_rx_time = None
+            post_match_deadline = None
+
+            while time.time() < deadline:
+                n = ser.in_waiting
+                if n:
+                    chunk = ser.read(n)
+                    last_rx_time = time.time()
+
+                    # decode chunk (ưu tiên utf-8, fallback latin-1)
+                    try:
+                        decoded = chunk.decode("utf-8")
+                    except UnicodeDecodeError:
+                        decoded = chunk.decode("latin-1", errors="ignore")
+
+                    response += decoded
+                    log_callback(f"[debug][{port}] rx={decoded!r}")
+
+                    # nếu match điều kiện kết thúc: đừng break ngay, chờ thêm chút để hốt đuôi
+                    if should_break(response, rules):
+                        post_match_deadline = time.time() + idle_after_match
+
+                else:
+                    now = time.time()
+
+                    # nếu đã match break trước đó và đã “idle đủ lâu” => kết thúc
+                    if post_match_deadline and now >= post_match_deadline:
+                        break
+
+                    # nếu đã nhận được data rồi nhưng im lặng quá lâu => cũng có thể kết thúc
+                    if last_rx_time and (now - last_rx_time) >= idle_no_new_data:
+                        break
+
+                    time.sleep(0.01)
+
+            if response.strip():
+                return True, response.strip()
 
             return False, "No response (timeout)"
 
@@ -1328,4 +1443,3 @@ def control_comscan(
     except serial.SerialException as e:
         log_callback(f"[ERROR] Serial error on {port}: {e}")
         return None
-
