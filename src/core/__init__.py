@@ -5,7 +5,9 @@ import configparser
 import os
 import re
 import time
+import tempfile
 import serial
+import binascii
 from src import *
 from dataclasses import dataclass
 from pathlib import Path
@@ -970,6 +972,134 @@ def should_break(response: str, rules: List[BreakRule]) -> bool:
 # =========================
 CFG = ConfigManager(app_dir() / "config.ini")
 
+import unicodedata
+
+def sanitize_response(s: str) -> str:
+    # normalize unicode (BOM, fullwidth, etc.)
+    s = unicodedata.normalize("NFKC", s)
+    # remove common invisible chars
+    s = s.replace("\ufeff", "").replace("\u200b", "").replace("\x00", "")
+    # remove other ASCII control chars except \r\n\t
+    s = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
+    return s
+
+def _write_readback_temp_txt(
+    content: str,
+    *,
+    prefix: str = "sfc_resp_",
+    suffix: str = ".txt",
+    temp_dir: str | Path | None = None,
+    log_callback: Callable[[str], None] = print,
+) -> str:
+    """
+    Write content to a temp UTF-8 txt file, log its content, then read back and return.
+    """
+    tmp_dir = Path(temp_dir).expanduser() if temp_dir else Path(tempfile.gettempdir())
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # mkstemp: lấy fd + path, tránh vấn đề Windows đang mở file khi reopen
+    fd, tmp_path_s = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=str(tmp_dir))
+    tmp_path = Path(tmp_path_s)
+
+    try:
+        # đóng fd ngay để có thể open lại bình thường (đặc biệt trên Windows)
+        os.close(fd)
+
+        tmp_path.write_text(content, encoding="utf-8", errors="strict")
+
+        # log nội dung file vừa ghi
+        file_text = tmp_path.read_text(encoding="utf-8", errors="replace")
+        log_callback(f"[debug][tempfile] wrote: {tmp_path}")
+        log_callback(f"[debug][tempfile] content:\n{file_text}")
+
+        # đọc lại lần nữa để trả về (đúng theo yêu cầu “đọc file rồi trả”)
+        readback = tmp_path.read_text(encoding="utf-8", errors="replace")
+        return readback
+
+    finally:
+        # bạn muốn giữ file để debug thì comment dòng unlink này lại
+        try:
+            tmp_path.unlink(missing_ok=True)  # py3.8+ ok; nếu thấp hơn thì dùng exists()
+        except Exception:
+            pass
+
+def _save_raw_capture(
+    raw: bytes,
+    *,
+    prefix: str,
+    temp_dir: str | Path | None,
+    log_callback: Callable[[str], None],
+) -> tuple[Path, Path]:
+    """
+    Save raw bytes to .bin and hexdump to .hex.txt under temp dir.
+    Return (bin_path, hex_path).
+    """
+    td = Path(temp_dir).expanduser() if temp_dir else Path(tempfile.gettempdir())
+    td.mkdir(parents=True, exist_ok=True)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    bin_path = td / f"{prefix}_{ts}.bin"
+    hex_path = td / f"{prefix}_{ts}.hex.txt"
+
+    bin_path.write_bytes(raw)
+
+    # hexdump (group 16 bytes/line for readability)
+    lines = []
+    for i in range(0, len(raw), 16):
+        chunk = raw[i : i + 16]
+        hexs = binascii.hexlify(chunk).decode("ascii")
+        spaced = " ".join(hexs[j:j+2] for j in range(0, len(hexs), 2))
+        ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+        lines.append(f"{i:08x}  {spaced:<47}  |{ascii_preview}|")
+
+    hex_path.write_text("\n".join(lines), encoding="utf-8", errors="replace")
+
+    log_callback(f"[debug][raw] saved bin: {bin_path}")
+    log_callback(f"[debug][raw] saved hex: {hex_path}")
+
+    return bin_path, hex_path
+
+
+import codecs
+from typing import Optional
+
+def decode_if_bom(raw: bytes) -> Optional[str]:
+    """
+    Nếu raw bắt đầu bằng BOM (UTF-8/16/32), decode đúng encoding và trả về str.
+    Nếu không có BOM -> return None.
+    """
+    if not raw:
+        return None
+
+    # UTF-8 BOM
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig", errors="replace")
+
+    # UTF-16 BOM
+    if raw.startswith(codecs.BOM_UTF16_LE):
+        return raw.decode("utf-16le", errors="replace")
+    if raw.startswith(codecs.BOM_UTF16_BE):
+        return raw.decode("utf-16be", errors="replace")
+
+    # UTF-32 BOM (ít gặp nhưng thêm cho đủ)
+    if raw.startswith(codecs.BOM_UTF32_LE):
+        return raw.decode("utf-32le", errors="replace")
+    if raw.startswith(codecs.BOM_UTF32_BE):
+        return raw.decode("utf-32be", errors="replace")
+
+    return None
+
+
+def strip_bom_chars(s: str) -> str:
+    """
+    BOM trong unicode string thường là '\ufeff'.
+    Chỉ strip BOM, không đụng ký tự khác.
+    """
+    if not s:
+        return s
+    # Thường BOM ở đầu; nhưng đôi khi bị chèn nhiều chỗ -> replace nhẹ
+    return s.lstrip("\ufeff").replace("\ufeff", "")
+
 def send_text_and_wait(
     text: str,
     port: str = "COM7",
@@ -1021,7 +1151,7 @@ def send_text_and_wait(
             # ---- SEND ----
             # Nhiều thiết bị text-based yêu cầu CRLF để kết thúc frame/lệnh.
             send_str = text + ("\r\n" if write_append_crlf else "")
-            send_bytes = send_str.encode("utf-8", errors="replace")
+            send_bytes = send_str.encode("ascii", errors="replace")
 
             # Reset buffer để tránh dính data cũ (stale) từ lần trước
             ser.reset_input_buffer()
@@ -1033,16 +1163,24 @@ def send_text_and_wait(
             # ---- WAIT RESPONSE ----
             deadline = time.time() + read_timeout
             response = ""
+            raw_buf = bytearray()   # <-- NEW: gom raw bytes
 
             while time.time() < deadline:
                 # readline() phù hợp khi thiết bị có '\n' kết thúc dòng
                 line = ser.readline()
                 if line:
+
+                    raw_buf.extend(line)  # <-- NEW
+                    # log raw bytes của chunk này (ngắn gọn)
+                    log_callback(f"[debug][{port}][raw] {binascii.hexlify(line).decode('ascii')}")
                     # Decode text: ưu tiên utf-8, fallback latin-1 để không crash
                     try:
-                        decoded = line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        decoded = line.decode("latin-1", errors="ignore")
+                        decoded = line.decode("ascii")
+                    except Exception:
+                        try:
+                            decoded = line.decode("utf-8")
+                        except Exception:
+                            decoded = line.decode("latin-1", errors="ignore")
 
                     response += decoded
                     log_callback(f"[debug][{port}] -> {decoded!r}")
@@ -1055,14 +1193,65 @@ def send_text_and_wait(
                         break
                 else:
                     # Ngủ nhẹ để tránh while loop ăn CPU 100%
-                    time.sleep(0.01)
+                    time.sleep(0.001)
 
             # upper = response.upper()
             # if "FAIL" in upper or "ERRO" in upper:
             #     return False, f"{port} FAIL/ERRO - {response.strip()}"
 
+            # ---- NEW: log tổng quan raw capture ----
+            raw_bytes = bytes(raw_buf)
+            if raw_bytes:
+                # check dấu hiệu UTF-16/padding
+                has_nul = (b"\x00" in raw_bytes)
+                log_callback(f"[debug][raw] total_len={len(raw_bytes)} has_NUL={has_nul}")
+
+                # lưu file để soi
+                _save_raw_capture(
+                    raw_bytes,
+                    prefix=f"{port}_laser_resp",
+                    temp_dir=app_dir(),
+                    log_callback=log_callback,
+                )
+
             if response.strip():
-                return True, response.strip()
+                log_callback("[Original]")
+                log_callback(f"[debug] resp_repr={response!r}")
+                
+                # --- BOM-aware normalize ---
+                fixed = None
+
+                # 1) ưu tiên BOM từ raw_bytes (đúng nguồn nhất)
+                bom_decoded = decode_if_bom(raw_bytes)
+                if bom_decoded is not None:
+                    fixed = bom_decoded
+                    log_callback("[BOM Detected in RAW] decoded_from_raw_bytes")
+
+                # 2) nếu không có BOM bytes nhưng string có BOM char
+                elif "\ufeff" in response:
+                    fixed = strip_bom_chars(response)
+                    log_callback("[BOM Char Detected in STR] stripped_unicode_bom")
+
+                # 3) nếu không có vấn đề -> giữ như cũ
+                final_resp = fixed if fixed is not None else response
+
+                # (tuỳ bạn) nếu bạn muốn “clean” thêm như sanitize_response, chỉ áp khi đã fixed
+                # nếu không muốn thay đổi khi bình thường -> đừng áp cho case fixed is None
+                if fixed is not None:
+                    final_resp = sanitize_response(final_resp)
+
+                log_callback("[Final Used]")
+                log_callback(f"[debug] resp_repr={final_resp!r}")
+                log_callback(f"[debug] has_BOM={'\\ufeff' in final_resp} len={len(final_resp)}")
+
+                # ---- write temp -> log -> read back -> return ----
+                readback = _write_readback_temp_txt(
+                    final_resp.strip(),
+                    temp_dir=app_dir(),
+                    log_callback=log_callback,
+                )
+                return True, readback.strip()
+
 
             return False, "No response (timeout)"
 
