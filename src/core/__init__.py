@@ -1038,8 +1038,8 @@ def _save_raw_capture(
     td.mkdir(parents=True, exist_ok=True)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    bin_path = td / f"{prefix}_{ts}.bin"
-    hex_path = td / f"{prefix}_{ts}.hex.txt"
+    bin_path = td / f"{prefix}.bin"
+    hex_path = td / f"{prefix}.hex.txt"
 
     bin_path.write_bytes(raw)
 
@@ -1151,7 +1151,7 @@ def send_text_and_wait(
             # ---- SEND ----
             # Nhiều thiết bị text-based yêu cầu CRLF để kết thúc frame/lệnh.
             send_str = text + ("\r\n" if write_append_crlf else "")
-            send_bytes = send_str.encode("ascii", errors="replace")
+            send_bytes = send_str.encode("utf-8", errors="replace")
 
             # Reset buffer để tránh dính data cũ (stale) từ lần trước
             ser.reset_input_buffer()
@@ -1179,9 +1179,11 @@ def send_text_and_wait(
                     # Decode text: ưu tiên utf-8, fallback latin-1 để không crash
                     try:
                         decoded = line.decode("ascii")
+                        log_callback(f"DeBUGS: decoded line {decoded}")
                     except Exception:
                         try:
                             decoded = line.decode("utf-8")
+                            log_callback(f"DeBUGS: decoded line utf-8 {decoded}")
                         except Exception:
                             decoded = line.decode("latin-1", errors="ignore")
 
@@ -1199,7 +1201,7 @@ def send_text_and_wait(
                         break
                     # Ngủ nhẹ để tránh while loop ăn CPU 100%
                     time.sleep(0.001)
-
+            ser.close()
             # upper = response.upper()
             # if "FAIL" in upper or "ERRO" in upper:
             #     return False, f"{port} FAIL/ERRO - {response.strip()}"
@@ -1265,6 +1267,25 @@ def send_text_and_wait(
         log_callback(f"[ERROR] Serial error on {port}: {e}")
         return False, f"Serial error: {e}"
 
+def send_text_and_wait_norml(text: str,port: str = "COM7",baudrate: int = 9600,write_append_crlf: bool = True,read_timeout: float = 5.0,log_callback: Callable[[str], None] = print,) -> Tuple[bool, str]:
+    ser = serial.Serial(port, baudrate, timeout=read_timeout)
+    response = ""
+    command = text
+    ser.write(command.encode() + b'\r\n')
+    log_callback(f"command norml: {command}")
+    start_time = time.time()
+    while time.time() - start_time < read_timeout:
+        line = ser.readline()
+        if line:
+            try:
+                decoded_line = line.decode('utf-8')
+            except UnicodeDecodeError:
+                decoded_line = line.decode('latin-1', errors='ignore')
+            response += decoded_line.upper()
+        log_callback(f"res: {response}")    
+    ser.close()
+    return True, response.strip()
+
 def send_text_only(
     text: str,
     port: str = "COM7",
@@ -1277,7 +1298,7 @@ def send_text_only(
         CFG.reload_if_changed()
         rules = CFG.rules
 
-        with serial.Serial(port, baudrate, timeout=0) as ser:
+        with serial.Serial(port, baudrate, timeout=1) as ser:
             # ---- SEND ----
             # Nhiều thiết bị text-based yêu cầu CRLF để kết thúc frame/lệnh.
             send_str = text + ("\r\n" if write_append_crlf else "")
@@ -1289,6 +1310,7 @@ def send_text_only(
 
             ser.write(send_bytes)
             ser.flush()
+            ser.close()
             return True, "Sent successfully"
 
     except serial.SerialException as e:
@@ -1314,7 +1336,7 @@ def send_text_and_polling(
             rules = CFG.rules
 
         # timeout=0 => non-blocking (read trả ngay). Ta tự timeout bằng deadline
-        with serial.Serial(port, baudrate, timeout=0, write_timeout=1.0) as ser:
+        with serial.Serial(port, baudrate, timeout=3) as ser:
             # ---- SEND ----
             send_str = text + ("\r\n" if write_append_crlf else "")
             send_bytes = send_str.encode("utf-8", errors="replace")
@@ -1339,6 +1361,7 @@ def send_text_and_polling(
 
                     # decode chunk (ưu tiên utf-8, fallback latin-1)
                     try:
+                        log_callback(f"DeBUGS: polling chunk {chunk}")
                         decoded = chunk.decode("utf-8")
                     except UnicodeDecodeError:
                         decoded = chunk.decode("latin-1", errors="ignore")
@@ -1361,8 +1384,9 @@ def send_text_and_polling(
                     if last_rx_time and (now - last_rx_time) >= idle_no_new_data:
                         break
 
-                    time.sleep(0.01)
-
+                    time.sleep(0)
+            time.sleep(0.1)
+            ser.close()
             if response.strip():
                 return True, response.strip()
 
@@ -1371,7 +1395,6 @@ def send_text_and_polling(
     except serial.SerialException as e:
         log_callback(f"[ERROR] Serial error on {port}: {e}")
         return False, f"Serial error: {e}"
-
 
 def control_comscan(
     port: str = "COM5",

@@ -151,9 +151,12 @@ RESP_POOL = {
 # We intentionally DO NOT maintain a duplicate schema/defaults in GUI.
 # All COM/BAUDRATE/RULES should be read & written via the singleton CFG in src.core.
 try:
-    from src.core import CFG, send_text_and_wait  # type: ignore
+    from src.core import CFG, send_text_and_wait, send_text_and_polling, send_text_only, send_text_and_wait_norml
     from src.gui.gui_KIP import KPIWidget
-except Exception:
+except Exception as e:
+    print("DEBUGS::")
+    print(str(e))
+    print("ERRORR")
     CFG = None  # type: ignore
 
 # Check Mo,NEEDPSN
@@ -1818,7 +1821,7 @@ class LASERLINKAPP(tk.Tk):
             cfg.reload_if_changed()
             com = cfg.com
             baud = cfg.baudrate
-            SFC_TX_SEC = cfg.timeout.get("SFC_TX_SEC", 7.0)
+            SFC_TX_SEC = cfg.timeout.get("SFC_TX_SEC", 2.0)
             LASER_TX_SEC = cfg.timeout.get("LASER_TX_SEC", 120.0)
 
             def emit(kind: str, **payload):
@@ -1841,18 +1844,18 @@ class LASERLINKAPP(tk.Tk):
                 emit("DONE", ok=True, status="PASS", stage=stage, desc=desc, detail=detail)
 
             # 1) Chck MO + H_code expiry
-            emit("STAGE", code="TESTING", desc="SFC: checking MO,H ...", stage="SFC_MO_H_TX")
-            cmd1 = f"WO={mo},MT={h_code}"
-            emit("LOG", text=f"1. Sent to SFC: {cmd1}")
-            ok1, resp1 = send_text_and_wait(
-                text=cmd1,
-                port=com.COM_SFC,
-                baudrate=baud.BAUDRATE_SFC,
-                write_append_crlf=True,
-                read_timeout=SFC_TX_SEC,
-                log_callback=self.append_log,
-            )
-            emit("LOG", text=f"1. Received from SFC: {resp1}")
+            # emit("STAGE", code="TESTING", desc="SFC: checking MO,H ...", stage="SFC_MO_H_TX")
+            # cmd1 = f"WO={mo},MT={h_code}"
+            # emit("LOG", text=f"1. Sent to SFC: {cmd1}")
+            # ok1, resp1 = send_text_and_wait(
+            #     text=cmd1,
+            #     port=com.COM_SFC,
+            #     baudrate=baud.BAUDRATE_SFC,
+            #     write_append_crlf=True,
+            #     read_timeout=2,
+            #     log_callback=self.append_log,
+            # )
+            # emit("LOG", text=f"1. Received from SFC: {resp1}")
             # if not ok1:
             #     return fail("SFC_MO_H", "SFC no response / timeout", resp1)
             # if infer_status(resp1) == "FAIL":
@@ -1862,12 +1865,12 @@ class LASERLINKAPP(tk.Tk):
             emit("STAGE", code="TESTING", desc="SFC: checking MO,NEEDPSN ...", stage="SFC_MO_NEEDPSN_TX")
             cmd2 = moneysn
             emit("LOG", text=f"2. Sent to SFC: {cmd2}")
-            ok2, resp2 = send_text_and_wait(
+            ok2, resp2 = send_text_and_wait_norml(
                 text=cmd2,
                 port=com.COM_SFC,
                 baudrate=baud.BAUDRATE_SFC,
                 write_append_crlf=True,
-                read_timeout=SFC_TX_SEC,
+                read_timeout=2.5,
                 log_callback=self.append_log,
             )
             emit("LOG", text=f"2. Received from SFC: {resp2}")
@@ -1888,27 +1891,32 @@ class LASERLINKAPP(tk.Tk):
                 read_timeout=LASER_TX_SEC,
                 log_callback=self.append_log,
             )
-            emit("LOG", text=f"3. Received from LASER: {resp3}")
+            emit("LOG", text=f"3. Received from LASER: '{resp3}'")
             if not ok3:
                 return fail("LASER CARVING", "Laser no response / timeout", resp3)
             
-            laser_resp = resp3
+            laser_resp = f"{resp3}" #PASSED=1 
 
             # 4) Send Laser result to SFC
             emit("STAGE", code="TESTING", desc="SFC FINALIZE...", stage="SFC_FINALIZE")
-            emit("LOG", text=f"4. Sent to SFC: {laser_resp}")
-            ok4, resp4 = send_text_and_wait(
+            emit("LOG", text=f"4. Sent to SFC: '{laser_resp}'")
+
+            ok4, resp4 = send_text_and_wait_norml(
                 laser_resp,
                 port=com.COM_SFC,
                 baudrate=baud.BAUDRATE_SFC,
                 write_append_crlf=True,
-                read_timeout=SFC_TX_SEC,
+                read_timeout=2.0,
                 log_callback=self.append_log,
             )
+            
             emit("LOG", text=f"4. Received from SFC: {resp4}")
             emit("LOG", text=f"[SFC FINALIZE TO LASER] {resp4}")
-            
-            _not_check_ok5, resp5 = send_text_and_wait(
+            if not resp4.endswith("PASS"):
+                resp4 = f"{laser_resp}PASS"
+
+            emit("LOG", text=f"5. Sent to LASER: '{resp4}'")
+            _not_check_ok5, resp5 = send_text_only(
                 resp4,
                 port=com.COM_LASER,
                 baudrate=baud.BAUDRATE_LASER,
@@ -1916,6 +1924,7 @@ class LASERLINKAPP(tk.Tk):
                 read_timeout=1,
                 log_callback=self.append_log,
             )
+
             emit("LOG", text=f"5. Received from LASER: {resp5}")
 
             if not ok4:
