@@ -152,6 +152,7 @@ RESP_POOL = {
 # All COM/BAUDRATE/RULES should be read & written via the singleton CFG in src.core.
 try:
     from src.core import CFG, send_text_and_wait, send_text_and_polling, send_text_only, send_text_and_wait_norml
+    from src.core.core_serial import SFCComReader
     from src.gui.gui_KIP import KPIWidget
 except Exception as e:
     print("DEBUGS::")
@@ -1311,6 +1312,14 @@ class LASERLINKAPP(tk.Tk):
         # status default for new UX
         self.set_status("READY", "Select/Enter MO, then scan H Box Code")
 
+        cfg = self.cfg or CFG
+        cfg.reload_if_changed()
+        com = cfg.com
+        baud = cfg.baudrate
+        self.sfc_worker = SFCComReader(com.COM_SFC, baud.BAUDRATE_SFC, log=self.append_log)
+        self.sfc_worker.start()
+
+
     # TODO: refactor enable/disable inputs
     def disable_inputs(self):
         try:
@@ -1865,6 +1874,21 @@ class LASERLINKAPP(tk.Tk):
             emit("STAGE", code="TESTING", desc="SFC: checking MO,NEEDPSN ...", stage="SFC_MO_NEEDPSN_TX")
             cmd2 = moneysn
             emit("LOG", text=f"2. Sent to SFC: {cmd2}")
+
+            expect = re.compile(r"(PASSED=1|PASSED=0|PASS|FAIL)", re.IGNORECASE)
+
+            ok2, best2, lines = self.sfc.send_and_collect(
+                "2790005467,PV61N04C3,PASSED=1",
+                timeout=5.0,
+                idle_after_last_rx=0.9,  # tăng để hốt đuôi trả trễ
+                expect=expect,
+                clear_before_send=True,
+            )
+
+            print("ok=", ok2)
+            print("best=", best2)
+            print("all lines=", lines)
+
             ok2, resp2 = send_text_and_wait_norml(
                 text=cmd2,
                 port=com.COM_SFC,

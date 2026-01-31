@@ -230,7 +230,7 @@ def _pick_best_line(lines: List[str]) -> str:
     def score(ln: str) -> int:
         up = ln.upper()
         sc = 0
-        if "PASS" in up or "FAIL" in up:
+        if "PASSED=0PASS" in up or "PASSED=1PASS" in up or ",PASS" in up or "PASS" in up or ",FAIL" in up or "FAIL" in up:
             sc += 100
         if "PASSED=1" in up or "PASSED=0" in up:
             sc += 30

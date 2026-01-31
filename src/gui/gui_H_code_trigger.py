@@ -1104,6 +1104,9 @@ class LASERLINKAPP(tk.Tk):
         # status default for new UX
         self.set_status("READY", "Select/Enter MO, then scan H Box Code")
 
+
+
+
     # TODO: refactor enable/disable inputs
     def disable_inputs(self):
         try:
