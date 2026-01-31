@@ -1265,8 +1265,6 @@ def send_text_and_wait(
         log_callback(f"[ERROR] Serial error on {port}: {e}")
         return False, f"Serial error: {e}"
 
-
-
 def send_text_only(
     text: str,
     port: str = "COM7",
